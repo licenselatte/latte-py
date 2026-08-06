@@ -4,6 +4,8 @@ Python SDK for [LicenseLatte](https://licenselatte.com), the software
 licensing platform. An idiomatic, from-scratch Python implementation of
 license activation and verification.
 
+Full docs: [licenselatte.com/docs/sdks/python](https://licenselatte.com/docs/sdks/python)
+
 **Read the [Threat Model](#threat-model) section below before relying on
 this package for anything security-sensitive.**
 
