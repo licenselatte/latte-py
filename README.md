@@ -7,6 +7,9 @@ license activation and verification.
 **Read the [Threat Model](#threat-model) section below before relying on
 this package for anything security-sensitive.**
 
+> [!NOTE]
+> The Python SDK versions independently from the other language bindings and follows semver. It's currently on v0.x, meaning the public API may still change without a major version bump. It moves to 1.0.0 once the API is validated across real integrations.
+
 ---
 
 ## What this package verifies
