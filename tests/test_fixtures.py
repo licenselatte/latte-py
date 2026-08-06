@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from latte import errors, validate, verify
 from latte.domain import CertChain
 
-TESTDATA = Path(__file__).parent.parent / "testdata"
+TESTDATA = Path(__file__).parent.parent / "testdata" / "vectors"
 
 
 def _load_fixtures() -> list[dict]:
