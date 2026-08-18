@@ -48,7 +48,19 @@ def sanitize_key(raw: str) -> str:
     characters ``O -> 0``, ``I -> 1``, ``L -> 1`` (``I`` and ``L`` both fold
     to ``1``, so a sanitized key can never distinguish an original ``L``
     from an original ``I`` from an original ``1``; this is intentional
-    behavior, not an oversight).
+    behavior, not an oversight). This fold is specific to the native key
+    alphabet (which deliberately excludes ``O``/``I``/``L``) — use it only
+    where the value is expected to be a native-format key. Use
+    ``normalize_key`` for anything else.
     """
     s = raw.upper().replace("-", "").replace(" ", "")
     return s.translate(_FOLD)
+
+
+def normalize_key(raw: str) -> str:
+    """Uppercases and strips hyphens/spaces, with no other transformation.
+    Unlike ``sanitize_key``, this never assumes the input is in the native
+    key alphabet, so it's safe to use on any license key string regardless
+    of which system minted it.
+    """
+    return raw.upper().replace("-", "").replace(" ", "")

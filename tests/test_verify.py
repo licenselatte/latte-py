@@ -73,6 +73,17 @@ def test_valid_chain_and_signature_is_accepted():
     lic = verify.verify_activation_at(c.master.public_key(), token, c.chain, float(now))
     assert lic.key == "KEY"
     assert lic.project_id == "proj_1"
+    assert lic.alias == ""
+
+
+def test_alias_claim_is_parsed_when_present():
+    now = 10_000_000
+    c = Chain(now)
+    claims = {**activation_claims(now), "alias": "ACMELEGACY2019KEY"}
+    token = sign_jwt(c.daily, claims)
+    lic = verify.verify_activation_at(c.master.public_key(), token, c.chain, float(now))
+    assert lic.key == "KEY"
+    assert lic.alias == "ACMELEGACY2019KEY"
 
 
 def test_tampered_signature_is_rejected():

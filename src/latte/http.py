@@ -30,10 +30,10 @@ import requests
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import errors, storage
+from . import errors, storage, validate, verify
 from .appid import parse_app_id
 from .domain import CertChain
-from .key import sanitize_key, validate_key
+from .key import normalize_key, sanitize_key
 from .license import PublicLicense, check_license_at
 
 # The Ed25519 public key used to verify every certificate chain. This is a
@@ -103,32 +103,43 @@ class Sdk:
     def activate(self, license_key: str, machine_id: str) -> PublicLicense:
         """Activates ``license_key`` for ``machine_id``.
 
-        The key is sanitized then format/checksum-validated against this
-        SDK's own project key first: a mismatch raises
-        ``InvalidKeyError`` and never reaches the network or the cache.
+        The key is normalized and given a minimal sanity check (non-empty,
+        not implausibly long) before ever reaching the network — a
+        license key may be native or a legacy-system alias (see the
+        legacy-key-migration feature in license-latte-api,
+        internal/usecase/api/activate_license.go), and only the server
+        knows which, so anything beyond that minimal check is deferred to
+        it.
 
-        With caching enabled, a cached activation for this exact
-        (sanitized) key is tried first; if it's still valid, it's
-        returned without a network call. Any other outcome (no cache, a
-        cache for a different key, or a cached token that fails
-        verification/validation) falls through to a network call, and a
-        successful result is written back to the cache. A server response
-        that fails local verification/validation raises ``ServerError``,
-        not one of the sentinel exceptions (those are reserved for the
-        server's HTTP status code itself).
+        With caching enabled, a cached activation for this exact key is
+        tried first; if it's still valid, it's returned without a network
+        call. A cache hit matches either the cached license's native key
+        (``sub`` claim) against the sanitized input, or — for a license
+        resolved via a legacy-key alias, where ``sub`` is the newly
+        minted native key rather than the string the caller keeps
+        passing — its ``alias`` claim against the normalized input. Any
+        other outcome (no cache, a cache for a different key, or a cached
+        token that fails verification/validation) falls through to a
+        network call, and a successful result is written back to the
+        cache. A server response that fails local verification/validation
+        raises ``ServerError``, not one of the sentinel exceptions (those
+        are reserved for the server's HTTP status code itself).
         """
         sanitized = sanitize_key(license_key)
-        self._validate_license_key(sanitized)
+        normalized = normalize_key(license_key)
+        self._validate_license_key(normalized)
 
         cached = self._cached_license(machine_id)
-        if cached is not None and cached.key == sanitized:
-            return cached
+        if cached is not None:
+            public, alias = cached
+            if public.key == sanitized or (alias != "" and alias == normalized):
+                return public
 
         token, chain = self._post_and_handle_invalidation(
             "/v1/activate",
             {
                 "project_key": self._app_id,
-                "license_key": sanitized,
+                "license_key": normalized,
                 "machine_id": machine_id,
             },
         )
@@ -187,20 +198,23 @@ class Sdk:
         except (errors.VerifyError, errors.ValidateError) as e:
             raise errors.NotActivatedError("not activated on this machine") from e
 
-    def _validate_license_key(self, sanitized: str) -> None:
-        """30 chars after sanitizing (6-char short_id + 22 random + 2
-        checksum); the short_id must equal the first 6 chars of this
-        project's AppID key segment, and the trailing 2 chars must be a
-        valid checksum over the 22 before them.
+    def _validate_license_key(self, normalized: str) -> None:
+        """A minimal local sanity check, not a format check: a license key
+        may be native or a legacy-system alias (see the legacy-key-migration
+        feature in license-latte-api,
+        internal/usecase/api/activate_license.go), and only the server
+        knows which. This exists
+        only to reject obviously-not-a-key input (empty, or implausibly
+        long) without a network round trip.
         """
-        if (
-            len(sanitized) != 30
-            or sanitized[:6] != self._app_key[:6]
-            or not validate_key(sanitized[6:], 2)
-        ):
+        if len(normalized) == 0 or len(normalized) > 256:
             raise errors.InvalidKeyError("invalid license key")
 
-    def _cached_license(self, machine_id: str) -> PublicLicense | None:
+    def _cached_license(self, machine_id: str) -> tuple[PublicLicense, str] | None:
+        """Verifies+validates the cached token, if any, returning both its
+        public-facing shape and its (internal-only) alias claim so the
+        fast path in ``activate`` can match a legacy-key alias too.
+        """
         if self._cache_path is None:
             return None
         cached = storage.load(self._cache_path)
@@ -208,9 +222,23 @@ class Sdk:
             return None
         token, chain = cached
         try:
-            return check_license_at(self._master_pub, token, chain, machine_id, time.time())
+            now = time.time()
+            lic = verify.verify_activation_at(self._master_pub, token, chain, now)
+            validate.validate_at(lic, machine_id, now)
         except (errors.VerifyError, errors.ValidateError):
             return None
+        public = PublicLicense(
+            key=lic.key,
+            activation_id=lic.activation_id,
+            project_id=lic.project_id,
+            issued_at=lic.issued_at,
+            expires_at=lic.expires_at,
+            grace_period_secs=lic.grace_period_secs,
+            in_grace_period=validate.in_grace_period(lic, now),
+            license_type=lic.license_type,
+            metadata=lic.metadata,
+        )
+        return public, lic.alias
 
     def _save_to_cache(self, token: str, chain: CertChain) -> None:
         if self._cache_path is not None:

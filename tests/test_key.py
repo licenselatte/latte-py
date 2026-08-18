@@ -9,6 +9,10 @@ def test_sanitize_folds_ambiguous_chars():
     assert key.sanitize_key("ab-cd IL o") == "ABCD110"
 
 
+def test_normalize_strips_separators_without_folding_ambiguous_chars():
+    assert key.normalize_key("ab-cd IL o") == "ABCDILO"
+
+
 def test_checksum_round_trips():
     data = "AHAK85389VQYXYB6S4BW66SKE53TWVT"
     checksum = key._calculate_checksum(data, 4)

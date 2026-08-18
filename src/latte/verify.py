@@ -67,6 +67,7 @@ def verify_activation_at(
     claims = activation.claims
 
     key = claims.get("sub", "")
+    alias = claims.get("alias", "")
     activation_id = claims.get("aid", "")
     project_id = claims.get("pid", "")
     machine_id = claims.get("mid", "")
@@ -121,6 +122,7 @@ def verify_activation_at(
 
     return License(
         key=key,
+        alias=alias,
         activation_id=activation_id,
         project_id=project_id,
         machine_id=machine_id,

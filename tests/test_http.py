@@ -194,23 +194,49 @@ def test_transport_failure_is_a_network_error(tmp_path: Path) -> None:
         sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
 
 
-def test_bad_license_key_format_never_reaches_the_network(tmp_path: Path) -> None:
+def test_empty_license_key_never_reaches_the_network(tmp_path: Path) -> None:
     # No @responses.activate at all: if activate() incorrectly made a
     # network call here, `requests` would try a real DNS lookup against
     # "mock.invalid" and fail loudly, so this test would fail either way a
     # bug could manifest.
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.InvalidKeyError):
-        sdk.activate("too-short", TEST_MACHINE_ID)
+        sdk.activate("", TEST_MACHINE_ID)
 
 
-def test_license_key_short_id_must_match_this_projects_app_key(tmp_path: Path) -> None:
+@responses.activate
+def test_non_native_format_key_reaches_the_network_instead_of_being_rejected_locally(
+    tmp_path: Path,
+) -> None:
+    # Doesn't match this project's short_id and fails the checksum -- the
+    # strict format gate used to reject this before ever calling the
+    # network. Now the server is the sole arbiter of native vs.
+    # legacy-alias vs. not-found, so it must reach the network unchanged
+    # (normalized only: uppercased, separators stripped).
+    legacy_key = "acme-legacy-2019-key"
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/activate",
+        json={
+            "token": "not-a-real-jwt",
+            "activation_id": "11111111-1111-1111-1111-111111111111",
+            "chain": {"submaster": "s", "project": "p", "daily": "d"},
+        },
+        status=200,
+        match=[
+            responses.matchers.json_params_matcher(
+                {
+                    "project_key": TEST_APP_ID,
+                    "license_key": "ACMELEGACY2019KEY",
+                    "machine_id": TEST_MACHINE_ID,
+                }
+            )
+        ],
+    )
+
     sdk = make_sdk(tmp_path / "cache.json")
-    # Right length and checksum, but a short_id belonging to a different
-    # project.
-    wrong_project_key = "ZZZZZZBCDEFGHJKMNPQRSTVWXYZ00Z"
-    with pytest.raises(errors.InvalidKeyError):
-        sdk.activate(wrong_project_key, TEST_MACHINE_ID)
+    with pytest.raises(errors.ServerError):
+        sdk.activate(legacy_key, TEST_MACHINE_ID)
 
 
 # --- cache ---
