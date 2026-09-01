@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .entitlements import EntitlementValue
+
 
 @dataclass(frozen=True)
 class CertChain:
@@ -44,6 +46,11 @@ class License:
     #: claim.
     alias: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
+    #: The decoded ``ent`` claim, or ``None`` when the token carried no
+    #: such claim at all -- a different thing from an empty mapping, and
+    #: the distinction ``PublicLicense.has_entitlements`` reports. See
+    #: ``latte.entitlements``.
+    entitlements: dict[str, EntitlementValue] | None = None
 
     @property
     def is_perpetual_fixed(self) -> bool:

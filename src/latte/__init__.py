@@ -12,8 +12,9 @@ correctness* as the compiled SDKs but not the same tamper resistance.
 
 from __future__ import annotations
 
-from . import appid, domain, errors, http, key, validate, verify
+from . import appid, domain, entitlements, errors, http, key, validate, verify
 from .domain import CertChain
+from .entitlements import UNLIMITED, EntitlementValue
 from .errors import (
     InvalidKeyError,
     InvalidProjectKeyError,
@@ -33,6 +34,7 @@ from .license import PublicLicense, check_license, check_license_at
 __all__ = [
     "appid",
     "domain",
+    "entitlements",
     "errors",
     "http",
     "key",
@@ -40,6 +42,8 @@ __all__ = [
     "verify",
     "CertChain",
     "Config",
+    "EntitlementValue",
+    "UNLIMITED",
     "Sdk",
     "PublicLicense",
     "check_license_at",

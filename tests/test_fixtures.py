@@ -15,6 +15,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from latte import errors, validate, verify
 from latte.domain import CertChain
+from latte.entitlements import UNLIMITED
+from latte.license import PublicLicense, _to_public_license
 
 TESTDATA = Path(__file__).parent.parent / "testdata" / "vectors"
 
@@ -92,6 +94,57 @@ def test_fixture(fixture: dict) -> None:
         f"in_grace_period mismatch for {fixture['name']}: got {in_grace}, "
         f"want {fixture['expect_in_grace_period']}"
     )
+
+    # Through _to_public_license rather than the decoder directly, so this
+    # covers the wiring an application actually gets back from activate()
+    # and check(), not just the parsing.
+    _assert_entitlements(_to_public_license(lic, in_grace), fixture)
+
+
+def _assert_entitlements(lic: PublicLicense, fixture: dict) -> None:
+    """Checks the shared entitlement contract from
+    latte-testvectors/README.md against one fixture.
+
+    It asserts the *accessors*, not just the mapping, because the mapping
+    is the easy half: the rules that actually split implementations are the
+    ones about input an SDK does not like -- a malformed value that must be
+    dropped rather than raised on, and the two coercions (a falsy 0, a
+    boolean read as 1) that must miss rather than convert.
+    """
+    name = fixture["name"]
+
+    assert lic.has_entitlements == fixture["expect_has_entitlements"], (
+        f"has_entitlements mismatch for {name}"
+    )
+    assert lic.entitlements == fixture["expect_entitlements"], (
+        f"entitlements mismatch for {name}: got {lic.entitlements}, "
+        f"want {fixture['expect_entitlements']}"
+    )
+
+    for key, want in fixture["expect_entitlements"].items():
+        # bool before int: in Python bool is an int subclass, so the
+        # obvious isinstance(want, int) would swallow every boolean and
+        # test the wrong accessor.
+        if isinstance(want, bool):
+            assert lic.can(key) is want, f"can({key!r}) mismatch for {name}"
+            # No coercion: a boolean is not 1 or 0.
+            assert lic.limit(key) is None, (
+                f"limit({key!r}) on a boolean entitlement must miss, in {name}"
+            )
+        else:
+            assert lic.limit(key) == want, f"limit({key!r}) mismatch for {name}"
+            if want == UNLIMITED:
+                assert lic.limit(key) == UNLIMITED, (
+                    f"limit({key!r}) must return the UNLIMITED sentinel as-is, in {name}"
+                )
+            # No coercion: an integer is not truthy, not even a non-zero one.
+            assert lic.can(key) is False, (
+                f"can({key!r}) on an integer entitlement must be False, in {name}"
+            )
+
+    # Absence denies, whether or not the claim was there at all.
+    assert lic.can("no_such_entitlement_key") is False
+    assert lic.limit("no_such_entitlement_key") is None
 
 
 def test_fixture_set_is_complete() -> None:

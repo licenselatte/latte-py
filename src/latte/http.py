@@ -34,7 +34,7 @@ from . import errors, storage, validate, verify
 from .appid import parse_app_id
 from .domain import CertChain
 from .key import normalize_key, sanitize_key
-from .license import PublicLicense, check_license_at
+from .license import PublicLicense, _to_public_license, check_license_at
 
 # The Ed25519 public key used to verify every certificate chain. This is a
 # public key, not a secret: it's meant to be embedded in every SDK.
@@ -227,17 +227,7 @@ class Sdk:
             validate.validate_at(lic, machine_id, now)
         except (errors.VerifyError, errors.ValidateError):
             return None
-        public = PublicLicense(
-            key=lic.key,
-            activation_id=lic.activation_id,
-            project_id=lic.project_id,
-            issued_at=lic.issued_at,
-            expires_at=lic.expires_at,
-            grace_period_secs=lic.grace_period_secs,
-            in_grace_period=validate.in_grace_period(lic, now),
-            license_type=lic.license_type,
-            metadata=lic.metadata,
-        )
+        public = _to_public_license(lic, validate.in_grace_period(lic, now))
         return public, lic.alias
 
     def _save_to_cache(self, token: str, chain: CertChain) -> None:

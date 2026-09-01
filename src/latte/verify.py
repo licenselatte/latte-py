@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import errors
 from .domain import CertChain, License
+from .entitlements import decode_entitlements
 from .jwt import parse_and_verify
 
 _ISSUER = "licenselatte"
@@ -78,6 +79,8 @@ def verify_activation_at(
     iat = float(claims["iat"]) if isinstance(claims.get("iat"), (int, float)) else 0.0
     exp = float(claims["exp"]) if isinstance(claims.get("exp"), (int, float)) else 0.0
 
+    entitlements = decode_entitlements(claims)
+
     metadata: dict[str, str] = {}
     pmd = claims.get("pmd")
     if isinstance(pmd, dict):
@@ -131,4 +134,5 @@ def verify_activation_at(
         grace_period_secs=grace_period_secs,
         license_type=license_type,
         metadata=metadata,
+        entitlements=entitlements,
     )
