@@ -1,10 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "latte-py"
-version = "0.3.0"
+# The version comes from the git tag via setuptools-scm, not from a literal
+# here -- see [tool.setuptools_scm]. There is deliberately nothing to keep
+# in sync: a release is `git tag vX.Y.Z && git push --tags`, and the tag is
+# the only place the number is written. This is the model latte-go has for
+# free, since Go modules have no manifest version at all.
+dynamic = ["version"]
 description = "Python SDK for LicenseLatte license activation and offline verification"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,6 +31,19 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+# An exact tag builds as that version (v0.3.0 -> 0.3.0); any commit after it
+# builds as a dev version (0.3.1.devN+g<sha>), so a wheel built off an
+# untagged commit can never be mistaken for a release.
+#
+# Building needs the tag to be reachable, so CI must check out with
+# fetch-depth: 0 -- the default depth-1 checkout has no history for
+# `git describe` to walk. Set SETUPTOOLS_SCM_PRETEND_VERSION to build
+# without git metadata at all.
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

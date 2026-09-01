@@ -1,0 +1,10 @@
+# setuptools-scm's file finder adds every git-tracked file to the sdist,
+# which sweeps in things that have no business on PyPI. Without these
+# prunes the sdist is ~2.5 MB, almost all of it fixture JSON.
+#
+# testdata/ is the latte-testvectors submodule: 29 signed fixtures that
+# exist to prove cross-language parity in CI, not to be shipped to users.
+prune testdata
+prune tests
+prune .github
+exclude .gitmodules
