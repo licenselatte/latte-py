@@ -11,7 +11,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import validate, verify
 from .domain import CertChain, License
@@ -79,7 +78,7 @@ class PublicLicense:
 
 
 def check_license_at(
-    master_pub: Ed25519PublicKey,
+    master_pub: verify.MasterKeys,
     token: str,
     chain: CertChain,
     machine_id: str,
@@ -127,7 +126,7 @@ def _to_public_license(lic: License, in_grace: bool) -> PublicLicense:
 
 
 def check_license(
-    master_pub: Ed25519PublicKey,
+    master_pub: verify.MasterKeys,
     token: str,
     chain: CertChain,
     machine_id: str,

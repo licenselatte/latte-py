@@ -28,17 +28,11 @@ from pathlib import Path
 
 import requests
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
 from . import errors, storage, validate, verify
 from .appid import parse_app_id
 from .domain import CertChain
 from .key import normalize_key, sanitize_key
 from .license import PublicLicense, _to_public_license, check_license_at
-
-# The Ed25519 public key used to verify every certificate chain. This is a
-# public key, not a secret: it's meant to be embedded in every SDK.
-_MASTER_PUBLIC_KEY_HEX = "6773cdfdfb7fc44f13f097449b715e7147a2d73f525d9f09a8d25229e458a2fb"
 
 _DEFAULT_TIMEOUT = 30.0
 
@@ -92,9 +86,12 @@ class Sdk:
         self._app_id = config.app_id
         self._app_key = parsed.key
         self._timeout = config.timeout
-        self._master_pub = Ed25519PublicKey.from_public_bytes(
-            bytes.fromhex(_MASTER_PUBLIC_KEY_HEX)
-        )
+        self._master_pub = verify.MASTER_PUBLIC_KEYS
+        # Imported here because the package imports this module before it
+        # defines __version__.
+        from . import __version__
+
+        self._sdk_info = {"language": "python", "version": __version__}
         self._session = requests.Session()
         self._cache_path: Path | None = None
         if config.cache:
@@ -141,6 +138,7 @@ class Sdk:
                 "project_key": self._app_id,
                 "license_key": normalized,
                 "machine_id": machine_id,
+                "sdk": self._sdk_info,
             },
         )
         lic = self._verify_and_validate(token, chain, machine_id)
@@ -164,6 +162,7 @@ class Sdk:
                 "activation_id": activation_id,
                 "license_key": license_key,
                 "machine_id": machine_id,
+                "sdk": self._sdk_info,
             },
         )
         lic = self._verify_and_validate(token, chain, machine_id)
@@ -255,7 +254,7 @@ class Sdk:
             raise errors.ServerError(f"server returned invalid token: {e}") from e
 
     def _post_and_handle_invalidation(
-        self, path: str, body: dict[str, str]
+        self, path: str, body: dict[str, object]
     ) -> tuple[str, CertChain]:
         """Calls ``_post``, and on a response that unambiguously means
         "this activation no longer exists" (not found / expired / wrong
@@ -270,7 +269,7 @@ class Sdk:
             self._clear_cache()
             raise
 
-    def _post(self, path: str, body: dict[str, str]) -> tuple[str, CertChain]:
+    def _post(self, path: str, body: dict[str, object]) -> tuple[str, CertChain]:
         """Shared POST helper for ``activate``/``renew``."""
         try:
             resp = self._session.post(

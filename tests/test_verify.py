@@ -103,6 +103,45 @@ def test_wrong_master_key_is_rejected():
         verify.verify_activation_at(wrong_master.public_key(), token, c.chain, float(now))
 
 
+def test_chain_rooted_in_any_listed_master_key_is_accepted():
+    now = 10_000_000
+    others = [Ed25519PrivateKey.generate().public_key() for _ in range(2)]
+    for position in range(3):
+        c = Chain(now)
+        keys = list(others)
+        keys.insert(position, c.master.public_key())
+        token = sign_jwt(c.daily, activation_claims(now))
+        lic = verify.verify_activation_at(keys, token, c.chain, float(now))
+        assert lic.key == "KEY"
+
+
+def test_chain_rooted_outside_the_master_key_list_is_rejected():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, activation_claims(now))
+    keys = [Ed25519PrivateKey.generate().public_key() for _ in range(3)]
+    with pytest.raises(errors.InvalidSignatureError):
+        verify.verify_activation_at(keys, token, c.chain, float(now))
+
+
+def test_empty_master_key_list_is_refused():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, activation_claims(now))
+    with pytest.raises(ValueError):
+        verify.verify_activation_at([], token, c.chain, float(now))
+
+
+def test_shipped_master_keys_are_the_four_trusted_roots():
+    raw = [k.public_bytes_raw().hex() for k in verify.MASTER_PUBLIC_KEYS]
+    assert raw == [
+        "6773cdfdfb7fc44f13f097449b715e7147a2d73f525d9f09a8d25229e458a2fb",
+        "73358e45a5c77b7f7236d26f5a1756011b522d277bb19ac4869d2e88952705cd",
+        "4f9369b8a4a0fd9be67cd403e4ed92e0d45609772659be4a066c1a9c4eff43fe",
+        "46d45bbc3280df763fcaf7a37055888eeefbb5781784c1f471f4f413d72b123f",
+    ]
+
+
 def test_broken_intermediate_link_is_rejected():
     now = 10_000_000
     c = Chain(now)

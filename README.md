@@ -19,7 +19,7 @@ this package for anything security-sensitive.**
 LicenseLatte licenses are issued as a chain of Ed25519-signed JWTs:
 
 ```
-Master (root, hardcoded in the SDK)
+Master (root, one of the keys hardcoded in the SDK)
   -> Submaster cert
        -> Project cert
             -> Daily cert
@@ -31,7 +31,8 @@ Each link is a standard compact-serialization JWT
 signed with Ed25519, see [RFC 8037]). Verifying a license means:
 
 1. Verify the submaster cert's signature against the hardcoded master public
-   key, extract the submaster's own public key from its `spk` claim.
+   keys (it must verify under any one of them), extract the submaster's own
+   public key from its `spk` claim.
 2. Verify the project cert's signature against the submaster's public key,
    extract `ppk`.
 3. Verify the daily cert's signature against the project's public key,
@@ -46,7 +47,7 @@ signed with Ed25519, see [RFC 8037]). Verifying a license means:
 This is a standard certificate-chain-of-trust design (the same shape as an
 X.509 chain, just JWTs instead of X.509 certs), documented publicly here per
 Kerckhoffs's principle: the *mechanism* is not the secret, the master
-private key is. This SDK ships only the master **public** key; key rotation
+private key is. This SDK ships only the master **public** keys; key rotation
 cadence, key storage, and the tooling that issues certs are intentionally
 not documented in any SDK repo.
 
@@ -136,15 +137,12 @@ pipeline `Sdk.activate`/`Sdk.check` do, against a token/chain you already
 have:
 
 ```python
-import time
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from latte import check_license, CertChain, VerifyError, ValidateError
+from latte import MASTER_PUBLIC_KEYS, check_license, CertChain, VerifyError, ValidateError
 
-master_pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(MASTER_PUBLIC_KEY_HEX))
 chain = CertChain(submaster=..., project=..., daily=...)
 
 try:
-    lic = check_license(master_pub, token, chain, machine_id)
+    lic = check_license(MASTER_PUBLIC_KEYS, token, chain, machine_id)
     print("license OK, expires", lic.expires_at)
     if lic.in_grace_period:
         print("warning: offline a while, please reconnect soon")

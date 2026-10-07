@@ -32,6 +32,7 @@ from .errors import (
 )
 from .http import Config, Sdk
 from .license import PublicLicense, check_license, check_license_at
+from .verify import MASTER_PUBLIC_KEYS
 
 try:
     #: The installed distribution's version. Written by setuptools-scm from
@@ -55,6 +56,7 @@ __all__ = [
     "validate",
     "verify",
     "CertChain",
+    "MASTER_PUBLIC_KEYS",
     "Config",
     "EntitlementValue",
     "UNLIMITED",

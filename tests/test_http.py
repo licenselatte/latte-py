@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 import responses
 
+import latte
 from latte import errors, storage
 from latte.domain import CertChain
 from latte.http import Config, Sdk
@@ -42,6 +43,9 @@ TEST_APP_ID = "pk_test_AHAK85389VQYXYB6S4BW66SKE53TWVTS"
 TEST_LICENSE_KEY = "AHAK85BCDEFGHJKMNPQRSTVWXYZ00Z"
 TEST_MACHINE_ID = "test-machine-id"
 BASE_URL = "https://mock.invalid"
+
+# Every activate/renew request names the SDK and the version sending it.
+SDK_INFO = {"language": "python", "version": latte.__version__}
 
 
 def make_sdk(cache_path: Path) -> Sdk:
@@ -69,6 +73,7 @@ def test_activate_sends_the_documented_request_shape(tmp_path: Path) -> None:
                     "project_key": TEST_APP_ID,
                     "license_key": TEST_LICENSE_KEY,
                     "machine_id": TEST_MACHINE_ID,
+                    "sdk": SDK_INFO,
                 }
             )
         ],
@@ -97,6 +102,7 @@ def test_renew_sends_the_documented_request_shape_without_project_key(tmp_path: 
                     "activation_id": activation_id,
                     "license_key": TEST_LICENSE_KEY,
                     "machine_id": TEST_MACHINE_ID,
+                    "sdk": SDK_INFO,
                 }
             )
         ],
@@ -229,6 +235,7 @@ def test_non_native_format_key_reaches_the_network_instead_of_being_rejected_loc
                     "project_key": TEST_APP_ID,
                     "license_key": "ACMELEGACY2019KEY",
                     "machine_id": TEST_MACHINE_ID,
+                    "sdk": SDK_INFO,
                 }
             )
         ],
