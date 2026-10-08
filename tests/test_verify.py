@@ -221,3 +221,62 @@ def test_malformed_token_rejected():
     c = Chain(now)
     with pytest.raises(errors.MalformedTokenError):
         verify.verify_activation_at(c.master.public_key(), "not-a-jwt", c.chain, float(now))
+
+
+# 2026-10-07 00:00 UTC. The daily cert runs from DAY to 00:05 UTC the next
+# day, as the server issues it.
+DAY = 1_791_331_200
+DAILY_EXP = DAY + 86_400 + 300
+
+
+def _daily_window_chain(daily_claims: dict | None = None) -> Chain:
+    c = Chain(DAY)
+    claims = {"iss": ISSUER, "iat": DAY, "exp": DAILY_EXP, "dpk": hexpub(c.daily)}
+    claims.update(daily_claims or {})
+    c.chain = CertChain(
+        submaster=sign_jwt(
+            c.master,
+            {"iss": ISSUER, "iat": DAY - 30 * 86_400, "exp": DAY + 150 * 86_400, "spk": hexpub(c.submaster)},
+        ),
+        project=sign_jwt(
+            c.submaster,
+            {
+                "iss": ISSUER, "iat": DAY - 30 * 86_400, "exp": DAY + 150 * 86_400,
+                "ppk": hexpub(c.project), "pid": "proj_1",
+            },
+        ),
+        daily=sign_jwt(c.project, claims),
+    )
+    return c
+
+
+@pytest.mark.parametrize("offline_secs", [60, 600, 86_400, 29 * 86_400])
+def test_token_verifies_offline_after_daily_cert_expires(offline_secs):
+    c = _daily_window_chain()
+    iat = DAY + 23 * 3600 + 59 * 60  # activated at 23:59 UTC
+    claims = activation_claims(iat)
+    claims["grc"] = 30 * 86_400
+    token = sign_jwt(c.daily, claims)
+    verify.verify_activation_at(c.master.public_key(), token, c.chain, float(iat + offline_secs))
+
+
+@pytest.mark.parametrize("iat", [DAY - 60, DAILY_EXP + 60])
+def test_token_dated_outside_daily_window_is_rejected(iat):
+    c = _daily_window_chain()
+    token = sign_jwt(c.daily, activation_claims(iat))
+    with pytest.raises(errors.ChainInconsistentError):
+        verify.verify_activation_at(c.master.public_key(), token, c.chain, float(iat + 60))
+
+
+def test_daily_cert_with_wrong_issuer_is_rejected():
+    c = _daily_window_chain({"iss": "someone-else"})
+    token = sign_jwt(c.daily, activation_claims(DAY + 60))
+    with pytest.raises(errors.WrongIssuerError):
+        verify.verify_activation_at(c.master.public_key(), token, c.chain, float(DAY + 120))
+
+
+def test_daily_cert_issued_in_the_future_is_rejected():
+    c = _daily_window_chain()
+    token = sign_jwt(c.daily, activation_claims(DAY + 60))
+    with pytest.raises(errors.NotYetValidError):
+        verify.verify_activation_at(c.master.public_key(), token, c.chain, float(DAY - 1))

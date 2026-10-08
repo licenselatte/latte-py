@@ -38,10 +38,11 @@ def parse_and_verify(
     expected_issuer: str,
     now: float,
     leeway_secs: float | None = 0,
+    check_exp: bool = True,
 ) -> ParsedJwt:
     """Parses and Ed25519-verifies a compact JWT, then validates ``iss`` and,
     with the given leeway (zero by default), ``iat``/``exp``/``nbf`` if
-    present.
+    present. ``check_exp=False`` skips only the ``exp`` check.
 
     Zero leeway is used for cert verification: submaster/project/daily
     certs get no clock-skew tolerance at all. Pass ``leeway_secs=None`` for
@@ -87,12 +88,14 @@ def parse_and_verify(
         raise errors.WrongIssuerError()
 
     if leeway_secs is not None:
-        _check_time_claims(claims, now, leeway_secs)
+        _check_time_claims(claims, now, leeway_secs, check_exp)
 
     return ParsedJwt(claims=claims)
 
 
-def _check_time_claims(claims: dict[str, Any], now: float, leeway_secs: float) -> None:
+def _check_time_claims(
+    claims: dict[str, Any], now: float, leeway_secs: float, check_exp: bool
+) -> None:
     iat = claims.get("iat")
     if isinstance(iat, (int, float)) and iat > now + leeway_secs:
         raise errors.NotYetValidError()
@@ -100,7 +103,7 @@ def _check_time_claims(claims: dict[str, Any], now: float, leeway_secs: float) -
     if isinstance(nbf, (int, float)) and nbf > now + leeway_secs:
         raise errors.NotYetValidError()
     exp = claims.get("exp")
-    if isinstance(exp, (int, float)) and exp < now - leeway_secs:
+    if check_exp and isinstance(exp, (int, float)) and exp < now - leeway_secs:
         raise errors.ExpiredError()
 
 

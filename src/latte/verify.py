@@ -1,8 +1,8 @@
 """Certificate chain verification: Master -> Submaster -> Project -> Daily
 -> activation token.
 
-Includes the chain cross-checks and one intentionally-preserved quirk:
-see the comment at that check below before "fixing" it.
+Includes the chain cross-checks. The daily cert's own ``exp`` is not
+checked against ``now``; its window bounds the activation's ``iat`` instead.
 """
 
 from __future__ import annotations
@@ -111,8 +111,11 @@ def verify_activation_at(
     proj = parse_and_verify(chain.project, submaster_pub, _ISSUER, now)
     project_pub = _pub_key_from_cert(proj.claims, "ppk")
 
-    # Step 3: daily cert, signed by project key.
-    daily = parse_and_verify(chain.daily, project_pub, _ISSUER, now)
+    # Step 3: daily cert, signed by project key. Its exp is not checked
+    # against now: it expires the morning after it is issued, and the token
+    # it signed has to verify offline for its whole grace period. Its window
+    # bounds the activation's iat instead, below.
+    daily = parse_and_verify(chain.daily, project_pub, _ISSUER, now, check_exp=False)
     daily_pub = _pub_key_from_cert(daily.claims, "dpk")
 
     # Step 4: activation JWT, signed by the daily key. An effectively-infinite
@@ -164,12 +167,8 @@ def verify_activation_at(
     if iat < daily_iat:
         raise errors.ChainInconsistentError("activation JWT iat is before daily cert iat")
 
-    # Cross-check intended to ensure the activation doesn't outlive the
-    # daily cert that signed it. This compares the activation's IssuedAt
-    # against the daily cert's exp, not the activation's own ExpiresAt as
-    # the error message below might suggest. This is intentional: do not
-    # change this to compare `exp` without explicit sign-off, since it
-    # changes accept/reject outcomes.
+    # Cross-check: activation iat must not follow the daily cert's exp, so a
+    # daily key cannot sign tokens dated after its own day.
     if iat > daily_exp:
         raise errors.ChainInconsistentError("activation JWT iat is after daily cert exp")
 
