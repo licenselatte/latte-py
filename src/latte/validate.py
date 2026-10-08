@@ -30,15 +30,6 @@ def validate_at(license: License, machine_id: str, now: float) -> None:
     if license.expires_at < license.issued_at:
         raise errors.InvalidFieldsError("expires_at is before issued_at")
 
-    # perpetual_fixed tokens never expire and have no grace-period check,
-    # but the four preconditions above still apply unconditionally,
-    # including grace_period > 0, even though it's otherwise unused for this
-    # type. The checks run before the branch on license_type.
-    if license.is_perpetual_fixed:
-        if now > license.expires_at:
-            raise errors.HardExpiredError()
-        return
-
     offline_deadline = license.issued_at + license.grace_period_secs
 
     if now > license.expires_at:

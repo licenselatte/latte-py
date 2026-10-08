@@ -16,7 +16,6 @@ class CertChain:
     daily: str
 
 
-PERPETUAL_FIXED = "perpetual_fixed"
 PERPETUAL = "perpetual"
 EXPIRING = "expiring"
 
@@ -51,7 +50,3 @@ class License:
     #: the distinction ``PublicLicense.has_entitlements`` reports. See
     #: ``latte.entitlements``.
     entitlements: dict[str, EntitlementValue] | None = None
-
-    @property
-    def is_perpetual_fixed(self) -> bool:
-        return self.license_type == PERPETUAL_FIXED

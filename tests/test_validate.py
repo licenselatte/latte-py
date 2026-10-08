@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from latte import errors, validate
-from latte.domain import EXPIRING, PERPETUAL_FIXED, License
+from latte.domain import EXPIRING, License
 
 DAY = 24 * 60 * 60
 NOW_ANCHOR = 10_000_000.0
@@ -70,22 +70,11 @@ def test_machine_id_mismatch():
         validate.validate_at(lic, "someone-else", NOW_ANCHOR)
 
 
-def test_perpetual_fixed_still_requires_positive_grace_period():
-    lic = make_license(license_type=PERPETUAL_FIXED, grace_period_secs=0)
-    with pytest.raises(errors.InvalidFieldsError):
-        validate.validate_at(lic, "M", NOW_ANCHOR)
-
-
-def test_perpetual_fixed_skips_grace_deadline_but_not_hard_expiry():
-    lic = make_license(license_type=PERPETUAL_FIXED)
+def test_perpetual_fixed_is_held_to_the_grace_deadline():
+    lic = make_license(license_type="perpetual_fixed")
     check_at = lic.issued_at + lic.grace_period_secs + 1
-    validate.validate_at(lic, "M", check_at)  # no raise: no grace check for this type
-
-
-def test_perpetual_fixed_still_hard_expires():
-    lic = make_license(license_type=PERPETUAL_FIXED, expires_at=NOW_ANCHOR - 1)
-    with pytest.raises(errors.HardExpiredError):
-        validate.validate_at(lic, "M", NOW_ANCHOR)
+    with pytest.raises(errors.GraceExpiredError):
+        validate.validate_at(lic, "M", check_at)
 
 
 def test_in_grace_period_false_before_60_minute_marker():
