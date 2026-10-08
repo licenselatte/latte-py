@@ -28,7 +28,7 @@ from pathlib import Path
 
 import requests
 
-from . import errors, storage, validate, verify
+from . import errors, machineid, storage, validate, verify
 from .appid import parse_app_id
 from .domain import CertChain
 from .key import normalize_key, sanitize_key
@@ -72,6 +72,18 @@ class Config:
     per-project default location. Ignored if ``cache`` is ``False``.
     """
 
+    machine_id: str | None = None
+    """A raw machine ID to use instead of the platform's. ``None`` or empty
+    reads the platform machine ID. Either way the SDK sends only its
+    HMAC-SHA256 under ``app_id`` (see ``latte.machineid``), never the raw
+    value.
+
+    Supply one when the platform ID does not identify one seat: containers
+    that share an image's ``/etc/machine-id`` or have none, cloned VMs, a
+    seat per user rather than per machine, and tests. Changing it on an
+    activated install counts as a new machine.
+    """
+
 
 class Sdk:
     """Activates and renews licenses over the network, with an optional
@@ -81,6 +93,8 @@ class Sdk:
 
     def __init__(self, config: Config) -> None:
         parsed = parse_app_id(config.app_id)  # raises an AppIdError subclass
+        raw = config.machine_id or machineid.read_platform_id()  # raises MachineIdError
+        self._machine_id = machineid.protected_id(raw, config.app_id)
 
         self._base_url = config.base_url or parsed.base_url
         self._app_id = config.app_id
@@ -97,8 +111,15 @@ class Sdk:
         if config.cache:
             self._cache_path = config.cache_path or storage.default_path(parsed.key)
 
-    def activate(self, license_key: str, machine_id: str) -> PublicLicense:
-        """Activates ``license_key`` for ``machine_id``.
+    @property
+    def machine_id(self) -> str:
+        """The derived machine ID this SDK sends and validates against.
+        Pass it to ``check_license``/``check_license_at`` when checking a
+        token yourself."""
+        return self._machine_id
+
+    def activate(self, license_key: str) -> PublicLicense:
+        """Activates ``license_key`` on this machine.
 
         The key is normalized and given a minimal sanity check (non-empty,
         not implausibly long) before ever reaching the network — a
@@ -126,7 +147,7 @@ class Sdk:
         normalized = normalize_key(license_key)
         self._validate_license_key(normalized)
 
-        cached = self._cached_license(machine_id)
+        cached = self._cached_license()
         if cached is not None:
             public, alias = cached
             if public.key == sanitized or (alias != "" and alias == normalized):
@@ -137,15 +158,15 @@ class Sdk:
             {
                 "project_key": self._app_id,
                 "license_key": normalized,
-                "machine_id": machine_id,
+                "machine_id": self._machine_id,
                 "sdk": self._sdk_info,
             },
         )
-        lic = self._verify_and_validate(token, chain, machine_id)
+        lic = self._verify_and_validate(token, chain)
         self._save_to_cache(token, chain)
         return lic
 
-    def renew(self, activation_id: str, license_key: str, machine_id: str) -> PublicLicense:
+    def renew(self, activation_id: str, license_key: str) -> PublicLicense:
         """Renews an existing activation.
 
         Unlike ``activate``, this does not re-check the license-key format
@@ -161,16 +182,16 @@ class Sdk:
             {
                 "activation_id": activation_id,
                 "license_key": license_key,
-                "machine_id": machine_id,
+                "machine_id": self._machine_id,
                 "sdk": self._sdk_info,
             },
         )
-        lic = self._verify_and_validate(token, chain, machine_id)
+        lic = self._verify_and_validate(token, chain)
         self._save_to_cache(token, chain)
         return lic
 
-    def check(self, machine_id: str) -> PublicLicense:
-        """Reads the cached activation for ``machine_id`` without making a
+    def check(self) -> PublicLicense:
+        """Reads the cached activation for this machine without making a
         network call.
 
         Raises ``LicenseExpiredError`` if there's a cached token but it's
@@ -191,7 +212,7 @@ class Sdk:
 
         token, chain = cached
         try:
-            return check_license_at(self._master_pub, token, chain, machine_id, time.time())
+            return check_license_at(self._master_pub, token, chain, self._machine_id, time.time())
         except errors.HardExpiredError as e:
             raise errors.LicenseExpiredError("license expired") from e
         except (errors.VerifyError, errors.ValidateError) as e:
@@ -209,7 +230,7 @@ class Sdk:
         if len(normalized) == 0 or len(normalized) > 256:
             raise errors.InvalidKeyError("invalid license key")
 
-    def _cached_license(self, machine_id: str) -> tuple[PublicLicense, str] | None:
+    def _cached_license(self) -> tuple[PublicLicense, str] | None:
         """Verifies+validates the cached token, if any, returning both its
         public-facing shape and its (internal-only) alias claim so the
         fast path in ``activate`` can match a legacy-key alias too.
@@ -223,7 +244,7 @@ class Sdk:
         try:
             now = time.time()
             lic = verify.verify_activation_at(self._master_pub, token, chain, now)
-            validate.validate_at(lic, machine_id, now)
+            validate.validate_at(lic, self._machine_id, now)
         except (errors.VerifyError, errors.ValidateError):
             return None
         public = _to_public_license(lic, validate.in_grace_period(lic, now))
@@ -245,11 +266,9 @@ class Sdk:
             except OSError:
                 pass
 
-    def _verify_and_validate(
-        self, token: str, chain: CertChain, machine_id: str
-    ) -> PublicLicense:
+    def _verify_and_validate(self, token: str, chain: CertChain) -> PublicLicense:
         try:
-            return check_license_at(self._master_pub, token, chain, machine_id, time.time())
+            return check_license_at(self._master_pub, token, chain, self._machine_id, time.time())
         except (errors.VerifyError, errors.ValidateError) as e:
             raise errors.ServerError(f"server returned invalid token: {e}") from e
 

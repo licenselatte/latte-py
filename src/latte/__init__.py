@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as _version
 
-from . import appid, domain, entitlements, errors, http, key, validate, verify
+from . import appid, domain, entitlements, errors, http, key, machineid, validate, verify
 from .domain import CertChain
 from .entitlements import UNLIMITED, EntitlementValue
 from .errors import (
@@ -23,6 +23,7 @@ from .errors import (
     LatteError,
     LicenseExpiredError,
     LicenseNotFoundError,
+    MachineIdError,
     NetworkError,
     NotActivatedError,
     SeatLimitError,
@@ -53,6 +54,7 @@ __all__ = [
     "errors",
     "http",
     "key",
+    "machineid",
     "validate",
     "verify",
     "CertChain",
@@ -72,6 +74,7 @@ __all__ = [
     "NotActivatedError",
     "SeatLimitError",
     "LicenseNotFoundError",
+    "MachineIdError",
     "InvalidProjectKeyError",
     "NetworkError",
     "ServerError",

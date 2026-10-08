@@ -32,7 +32,7 @@ import pytest
 import responses
 
 import latte
-from latte import errors, storage
+from latte import errors, machineid, storage
 from latte.domain import CertChain
 from latte.http import Config, Sdk
 
@@ -42,6 +42,7 @@ from latte.http import Config, Sdk
 TEST_APP_ID = "pk_test_AHAK85389VQYXYB6S4BW66SKE53TWVTS"
 TEST_LICENSE_KEY = "AHAK85BCDEFGHJKMNPQRSTVWXYZ00Z"
 TEST_MACHINE_ID = "test-machine-id"
+TEST_DERIVED_MACHINE_ID = machineid.protected_id(TEST_MACHINE_ID, TEST_APP_ID)
 BASE_URL = "https://mock.invalid"
 
 # Every activate/renew request names the SDK and the version sending it.
@@ -49,7 +50,11 @@ SDK_INFO = {"language": "python", "version": latte.__version__}
 
 
 def make_sdk(cache_path: Path) -> Sdk:
-    return Sdk(Config(app_id=TEST_APP_ID, base_url=BASE_URL, cache_path=cache_path))
+    return Sdk(
+        Config(
+            app_id=TEST_APP_ID, machine_id=TEST_MACHINE_ID, base_url=BASE_URL, cache_path=cache_path
+        )
+    )
 
 
 def garbage_chain() -> CertChain:
@@ -72,7 +77,7 @@ def test_activate_sends_the_documented_request_shape(tmp_path: Path) -> None:
                 {
                     "project_key": TEST_APP_ID,
                     "license_key": TEST_LICENSE_KEY,
-                    "machine_id": TEST_MACHINE_ID,
+                    "machine_id": TEST_DERIVED_MACHINE_ID,
                     "sdk": SDK_INFO,
                 }
             )
@@ -81,7 +86,7 @@ def test_activate_sends_the_documented_request_shape(tmp_path: Path) -> None:
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -101,7 +106,7 @@ def test_renew_sends_the_documented_request_shape_without_project_key(tmp_path: 
                 {
                     "activation_id": activation_id,
                     "license_key": TEST_LICENSE_KEY,
-                    "machine_id": TEST_MACHINE_ID,
+                    "machine_id": TEST_DERIVED_MACHINE_ID,
                     "sdk": SDK_INFO,
                 }
             )
@@ -110,7 +115,7 @@ def test_renew_sends_the_documented_request_shape_without_project_key(tmp_path: 
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError):
-        sdk.renew(activation_id, TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.renew(activation_id, TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -130,7 +135,7 @@ def test_server_returned_token_that_fails_verification_is_a_server_error(
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError, match="^server returned invalid token:"):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @pytest.mark.parametrize(
@@ -155,7 +160,7 @@ def test_status_codes_map_to_the_documented_sentinels(
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(expected):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -169,7 +174,7 @@ def test_unmapped_status_code_is_a_server_error_with_the_server_message(tmp_path
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError, match="^something broke$"):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -187,7 +192,7 @@ def test_empty_token_in_a_200_response_is_a_server_error(tmp_path: Path) -> None
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError, match="^server returned empty token$"):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -197,7 +202,7 @@ def test_transport_failure_is_a_network_error(tmp_path: Path) -> None:
     # response (DNS/TCP/timeout).
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.NetworkError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 def test_empty_license_key_never_reaches_the_network(tmp_path: Path) -> None:
@@ -207,7 +212,7 @@ def test_empty_license_key_never_reaches_the_network(tmp_path: Path) -> None:
     # bug could manifest.
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.InvalidKeyError):
-        sdk.activate("", TEST_MACHINE_ID)
+        sdk.activate("")
 
 
 @responses.activate
@@ -234,7 +239,7 @@ def test_non_native_format_key_reaches_the_network_instead_of_being_rejected_loc
                 {
                     "project_key": TEST_APP_ID,
                     "license_key": "ACMELEGACY2019KEY",
-                    "machine_id": TEST_MACHINE_ID,
+                    "machine_id": TEST_DERIVED_MACHINE_ID,
                     "sdk": SDK_INFO,
                 }
             )
@@ -243,31 +248,40 @@ def test_non_native_format_key_reaches_the_network_instead_of_being_rejected_loc
 
     sdk = make_sdk(tmp_path / "cache.json")
     with pytest.raises(errors.ServerError):
-        sdk.activate(legacy_key, TEST_MACHINE_ID)
+        sdk.activate(legacy_key)
 
 
 # --- cache ---
 
 
 def test_check_reports_not_activated_when_nothing_is_cached(tmp_path: Path) -> None:
-    sdk = Sdk(Config(app_id=TEST_APP_ID, cache_path=tmp_path / "cache.json"))
+    sdk = Sdk(
+        Config(app_id=TEST_APP_ID, machine_id=TEST_MACHINE_ID, cache_path=tmp_path / "cache.json")
+    )
     with pytest.raises(errors.NotActivatedError):
-        sdk.check(TEST_MACHINE_ID)
+        sdk.check()
 
 
 def test_check_reports_not_activated_when_caching_is_disabled(tmp_path: Path) -> None:
-    sdk = Sdk(Config(app_id=TEST_APP_ID, cache=False, cache_path=tmp_path / "cache.json"))
+    sdk = Sdk(
+        Config(
+            app_id=TEST_APP_ID,
+            machine_id=TEST_MACHINE_ID,
+            cache=False,
+            cache_path=tmp_path / "cache.json",
+        )
+    )
     with pytest.raises(errors.NotActivatedError):
-        sdk.check(TEST_MACHINE_ID)
+        sdk.check()
 
 
 def test_check_reports_not_activated_for_a_cache_that_fails_verification(tmp_path: Path) -> None:
     cache_path = tmp_path / "cache.json"
     storage.save(cache_path, "not-a-real-jwt", garbage_chain())
 
-    sdk = Sdk(Config(app_id=TEST_APP_ID, cache_path=cache_path))
+    sdk = Sdk(Config(app_id=TEST_APP_ID, machine_id=TEST_MACHINE_ID, cache_path=cache_path))
     with pytest.raises(errors.NotActivatedError):
-        sdk.check(TEST_MACHINE_ID)
+        sdk.check()
 
 
 @responses.activate
@@ -283,7 +297,7 @@ def test_activate_falls_through_to_the_network_when_the_cache_is_unverifiable(
     # the unverifiable cache entry didn't short-circuit into a false
     # "success" or a cache-specific error.
     with pytest.raises(errors.LicenseNotFoundError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
 
 @responses.activate
@@ -304,7 +318,7 @@ def test_activate_does_not_cache_a_server_response_that_fails_verification(
 
     sdk = make_sdk(cache_path)
     with pytest.raises(errors.ServerError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
     assert storage.load(cache_path) is None
 
@@ -317,7 +331,7 @@ def test_activate_clears_an_existing_cache_entry_on_license_not_found(tmp_path: 
 
     sdk = make_sdk(cache_path)
     with pytest.raises(errors.LicenseNotFoundError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
     assert storage.load(cache_path) is None
 
@@ -331,7 +345,7 @@ def test_renew_clears_an_existing_cache_entry_on_license_expired(tmp_path: Path)
     sdk = make_sdk(cache_path)
     activation_id = "11111111-1111-1111-1111-111111111111"
     with pytest.raises(errors.LicenseExpiredError):
-        sdk.renew(activation_id, TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.renew(activation_id, TEST_LICENSE_KEY)
 
     assert storage.load(cache_path) is None
 
@@ -346,7 +360,7 @@ def test_activate_leaves_an_existing_cache_entry_alone_on_an_unrelated_server_er
 
     sdk = make_sdk(cache_path)
     with pytest.raises(errors.ServerError):
-        sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)
+        sdk.activate(TEST_LICENSE_KEY)
 
     # A 500 doesn't mean the activation is gone, just that something else
     # went wrong: an existing cache entry (unverifiable or not) shouldn't

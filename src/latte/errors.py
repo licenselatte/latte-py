@@ -71,7 +71,7 @@ class LicenseTooOldError(ValidateError):
 
 
 class MachineIdMismatchError(ValidateError):
-    """The caller-supplied machine ID doesn't match the license's ``mid`` claim."""
+    """The machine ID doesn't match the license's ``mid`` claim."""
 
 
 class InvalidFieldsError(ValidateError):
@@ -110,6 +110,11 @@ class LatteError(Exception):
     non-2xx/malformed server response, or (for ``check``) no usable cached
     license.
     """
+
+
+class MachineIdError(LatteError):
+    """No ``Config.machine_id`` was supplied and the platform machine ID
+    could not be read. Raised by the ``Sdk`` constructor."""
 
 
 class InvalidKeyError(LatteError):

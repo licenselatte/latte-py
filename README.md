@@ -78,7 +78,7 @@ from latte import Config, Sdk, LatteError
 sdk = Sdk(Config(app_id="pk_live_..."))  # from the LicenseLatte dashboard
 
 try:
-    lic = sdk.activate("USER-PROVIDED-LICENSE-KEY", "opaque-machine-id")
+    lic = sdk.activate("USER-PROVIDED-LICENSE-KEY")
     print("license OK, expires", lic.expires_at)
     if lic.in_grace_period:
         print("warning: offline a while, please reconnect soon")
@@ -95,13 +95,37 @@ no background renewal: call `renew` yourself on whatever schedule fits
 your application. Set `Config(cache=False)` to disable the cache entirely
 (e.g. a sandboxed environment with no writable filesystem).
 
+## The machine ID
+
+`Sdk` works out which machine it is running on once, when you construct it,
+and uses that for every `activate`, `renew` and `check`. It reads the
+platform's own machine ID: `/var/lib/dbus/machine-id` or `/etc/machine-id`
+on Linux, `IOPlatformUUID` from `ioreg` on macOS, `MachineGuid` from the
+registry on Windows, and `/etc/hostid` or `kenv` on the BSDs. That raw ID
+never leaves the machine. What the server sees, and what the token's `mid`
+claim holds, is lowercase hex `HMAC-SHA256(key = raw ID, message =
+"licenselatte_" + app_id)`, which `sdk.machine_id` exposes.
+
+If no machine ID can be read, the constructor raises `MachineIdError`.
+
+Supply your own raw ID with `Config(machine_id=...)` when the platform's does
+not identify one seat:
+
+- containers that share an image's `/etc/machine-id`, or have none;
+- cloned VMs, which inherit the image's ID;
+- a seat per user rather than per machine (pass a stable user ID);
+- tests.
+
+It is hashed the same way, byte for byte with no trimming. Changing it on an
+install that is already activated counts as a new machine.
+
 ## Checking a cached activation without a network call
 
 ```python
 from latte import LicenseExpiredError, NotActivatedError
 
 try:
-    lic = sdk.check("opaque-machine-id")
+    lic = sdk.check()
     print("license OK, expires", lic.expires_at)
 except LicenseExpiredError:
     print("license expired, please renew")
@@ -142,7 +166,7 @@ from latte import MASTER_PUBLIC_KEYS, check_license, CertChain, VerifyError, Val
 chain = CertChain(submaster=..., project=..., daily=...)
 
 try:
-    lic = check_license(MASTER_PUBLIC_KEYS, token, chain, machine_id)
+    lic = check_license(MASTER_PUBLIC_KEYS, token, chain, sdk.machine_id)
     print("license OK, expires", lic.expires_at)
     if lic.in_grace_period:
         print("warning: offline a while, please reconnect soon")
@@ -151,6 +175,9 @@ except VerifyError as e:
 except ValidateError as e:
     print("license rejected:", e)  # verified fine, but expired/out of grace/wrong machine
 ```
+
+`machine_id` here is the derived ID, never a raw one: pass `sdk.machine_id`,
+or `latte.machineid.protected_id(raw, app_id)` if you have no `Sdk`.
 
 `check_license_at(..., now)` is also available for callers who want to pass
 an explicit timestamp instead of the real system clock: this is what makes
@@ -204,7 +231,7 @@ their customer bought. Two questions, and only two: *may this customer do X*
 (a boolean) and *how many Y do they get* (an integer).
 
 ```python
-lic = sdk.activate(key, machine_id)
+lic = sdk.activate(key)
 
 if lic.can("export_pdf"):
     enable_pdf_export()
@@ -269,13 +296,9 @@ it server-side.
 
 ## What this package does *not* do
 
-OS-level machine-ID fingerprinting and background renewal scheduling are
-intentionally out of scope. Pass your own machine-ID string into
-`activate`/`renew`/`check`/`check_license`; only the opaque string compared
-against the token's `mid` claim matters, not the algorithm that produces
-it. For renewal, there's no scheduler here: `Sdk.renew` is the building
-block; call it on a timer, in response to a UI action, or whatever fits
-your application.
+Background renewal scheduling is intentionally out of scope. There's no
+scheduler here: `Sdk.renew` is the building block; call it on a timer, in
+response to a UI action, or whatever fits your application.
 
 ## Threat model
 

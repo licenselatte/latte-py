@@ -92,6 +92,10 @@ def check_license_at(
     out, or a ``ValidateError`` subclass if it checks out but is expired /
     out of grace / for the wrong machine. This is the primary entry point
     plugin developers embed: see README.md for usage.
+
+    ``machine_id`` is the derived ID compared with the token's ``mid``
+    claim, never a raw one: pass ``Sdk.machine_id``, or
+    ``latte.machineid.protected_id(raw, app_id)``.
     """
     lic = verify.verify_activation_at(master_pub, token, chain, now)
     validate.validate_at(lic, machine_id, now)
