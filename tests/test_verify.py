@@ -12,7 +12,7 @@ import json
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from latte import errors, verify
+from latte import errors, storage, verify
 from latte.domain import CertChain
 
 ISSUER = "licenselatte"
@@ -280,3 +280,42 @@ def test_daily_cert_issued_in_the_future_is_rejected():
     token = sign_jwt(c.daily, activation_claims(DAY + 60))
     with pytest.raises(errors.NotYetValidError):
         verify.verify_activation_at(c.master.public_key(), token, c.chain, float(DAY - 1))
+
+
+def _lex_claims(now: int, **extra) -> dict:
+    claims = activation_claims(now)
+    del claims["grc"]
+    claims["exp"] = now + 7 * 86_400
+    claims.update(extra)
+    return claims
+
+
+def test_token_without_grc_reads_exp_as_the_offline_deadline_and_lex_as_the_end():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, _lex_claims(now, lex=now + 3 * 86_400))
+    lic = verify.verify_activation_at(c.master.public_key(), token, c.chain, float(now))
+    assert lic.grace_period_secs == 7 * 86_400
+    assert lic.expires_at == now + 3 * 86_400
+
+
+def test_token_without_grc_or_lex_never_ends():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, _lex_claims(now))
+    lic = verify.verify_activation_at(c.master.public_key(), token, c.chain, float(now))
+    assert lic.expires_at == 4_070_908_800  # 2099-01-01T00:00:00Z
+
+
+@pytest.mark.parametrize("claims", [activation_claims(10_000_000), _lex_claims(10_000_000)])
+def test_cached_token_round_trips_in_both_formats(tmp_path, claims):
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, claims)
+    path = tmp_path / "cache.json"
+    storage.save(path, token, c.chain)
+    cached_token, cached_chain = storage.load(path)
+    master = c.master.public_key()
+    assert verify.verify_activation_at(master, cached_token, cached_chain, float(now)) == (
+        verify.verify_activation_at(master, token, c.chain, float(now))
+    )

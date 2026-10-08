@@ -33,7 +33,7 @@ class License:
     project_id: str
     machine_id: str
     issued_at: float  # unix seconds
-    expires_at: float  # unix seconds
+    expires_at: float  # unix seconds; 2099-01-01 when the licence never ends
     grace_period_secs: float
     license_type: str
     #: The legacy-system key string this license was resolved from, when

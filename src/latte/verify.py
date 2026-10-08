@@ -20,6 +20,8 @@ from .jwt import ParsedJwt, parse_and_verify
 
 _ISSUER = "licenselatte"
 _MAX_GRACE_PERIOD_SECS = 90 * 24 * 60 * 60
+# 2099-01-01T00:00:00Z: the end date of a licence that never ends.
+_NEVER_EXPIRES = 4_070_908_800.0
 
 # The Ed25519 master public keys a certificate chain may be rooted in. These
 # are public keys, not secrets: they're meant to be embedded in every SDK.
@@ -52,6 +54,11 @@ MASTER_PUBLIC_KEYS: tuple[Ed25519PublicKey, ...] = tuple(
 
 #: One master public key, or several of which any one may root the chain.
 MasterKeys = Union[Ed25519PublicKey, Sequence[Ed25519PublicKey]]
+
+
+def _num_claim(claims: dict[str, Any], name: str) -> float:
+    value = claims.get(name)
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def _pub_key_from_cert(claims: dict[str, Any], field: str) -> Ed25519PublicKey:
@@ -131,10 +138,21 @@ def verify_activation_at(
     machine_id = claims.get("mid", "")
     license_type = claims.get("ltype", "")
 
-    grc = claims.get("grc", 0)
-    grace_period_secs = max(float(grc) if isinstance(grc, (int, float)) else 0, 0)
-    iat = float(claims["iat"]) if isinstance(claims.get("iat"), (int, float)) else 0.0
-    exp = float(claims["exp"]) if isinstance(claims.get("exp"), (int, float)) else 0.0
+    iat = _num_claim(claims, "iat")
+    exp = _num_claim(claims, "exp")
+
+    # Two token formats, told apart by grc alone. With grc, exp is the
+    # licence's end and the offline deadline is iat + grc. Without it, exp
+    # is the offline deadline itself and lex, when present, is the
+    # licence's end; no lex means the licence never ends, read as
+    # _NEVER_EXPIRES. Either way validate.py sees an end date and a grace
+    # window measured from iat.
+    if "grc" in claims:
+        grace_period_secs = max(_num_claim(claims, "grc"), 0)
+        expires_at = exp
+    else:
+        grace_period_secs = max(exp - iat, 0)
+        expires_at = _num_claim(claims, "lex") if "lex" in claims else _NEVER_EXPIRES
 
     entitlements = decode_entitlements(claims)
 
@@ -183,7 +201,7 @@ def verify_activation_at(
         project_id=project_id,
         machine_id=machine_id,
         issued_at=iat,
-        expires_at=exp,
+        expires_at=expires_at,
         grace_period_secs=grace_period_secs,
         license_type=license_type,
         metadata=metadata,

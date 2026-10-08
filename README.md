@@ -174,6 +174,23 @@ a network call. Once that deadline passes, verification raises
 `GraceExpiredError`; once `now > expires_at`, it raises `HardExpiredError`
 (checked first: hard expiry always wins).
 
+`expires_at` is 2099-01-01T00:00:00Z (`4070908800`) for a licence that never ends.
+
+The activation token comes in two formats, told apart by whether it carries
+a `grc` claim:
+
+- **With `grc`:** `exp` is the licence's end (`expires_at`) and the grace
+  period is `grc` seconds.
+- **Without `grc`:** `exp` is the offline deadline itself, so the grace
+  period is `exp - iat`, and the optional `lex` claim (unix seconds) is the
+  licence's end. No `lex` means `expires_at` is 2099-01-01T00:00:00Z. Past `lex` the
+  token raises `HardExpiredError` even when `exp` is later.
+
+Both read into the same `issued_at`/`expires_at`/`grace_period_secs`, so the
+rules above apply unchanged. The token's `exp` is never enforced while
+verifying the signature chain; it is enforced only here, as these two
+errors.
+
 `PublicLicense.in_grace_period` is a softer, earlier warning signal: it
 turns `True` once more than 60 minutes have passed since the last
 issuance/renewal without a fresh one arriving, while still inside the grace
