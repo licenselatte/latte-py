@@ -168,7 +168,7 @@ that already went through is success. A machine that is lost, dead or wiped
 cannot call this; its seat is released from the seller's customer portal
 instead.
 
-On plans with the deactivation policy engine the seller may limit releases.
+Releases are limited on every plan: a fixed number per licence per year, or on plans with the deactivation policy engine the seller's cooldown and yearly cap.
 A refusal raises `DeactivationBlockedError`, whose message is written for the
 user, whose `reason` is `"deactivation_cooldown"` or
 `"deactivation_limit_reached"`, and whose `available_at` (unix seconds, or
