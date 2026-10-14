@@ -3,7 +3,8 @@ optional on-disk cache so repeat launches don't need a network call.
 
 Two independent things this module depends on, both bundled by default:
 
-- ``requests`` for the network calls (``activate``/``renew``).
+- ``requests`` for the network calls (``activate``/``renew`` and the
+  machine calls ``deactivate``/``machines``/``rename_machine``).
 - ``platformdirs`` for locating the on-disk cache (``Config.cache``,
   ``check``, and the fast path inside ``activate``/``renew``).
 
@@ -22,9 +23,13 @@ schedule fits your application.
 
 from __future__ import annotations
 
+import re
+import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -51,7 +56,7 @@ class Config:
     """``pk_{env}_{32-char key}``, shown in the LicenseLatte dashboard."""
 
     timeout: float = _DEFAULT_TIMEOUT
-    """Request timeout (seconds) for ``activate``/``renew``."""
+    """Request timeout (seconds) for every network call."""
 
     base_url: str | None = None
     """Override the API base URL that ``app_id``'s environment would
@@ -84,6 +89,48 @@ class Config:
     activated install counts as a new machine.
     """
 
+    machine_name: str | None = None
+    """The name this machine is given when it activates, shown to the
+    customer by ``machines`` and the customer portal and to you in the
+    dashboard. ``None`` sends the OS hostname; ``""`` sends no name. A name
+    the customer sets later with ``rename_machine`` is kept on
+    re-activation.
+    """
+
+
+@dataclass(frozen=True)
+class DeactivateResult:
+    """What ``Sdk.deactivate`` reports."""
+
+    released: bool
+    """``False`` when the machine was already released, on an earlier call
+    or by the seller. Both outcomes are success."""
+
+    seat_free_at: float | None
+    """When (unix seconds) the freed seat can be used by another machine,
+    set when the seller's policy holds it until this machine's last token
+    has expired. ``None`` means the seat is free now."""
+
+
+@dataclass(frozen=True)
+class Machine:
+    """One machine holding a seat on a licence, as ``Sdk.machines`` lists
+    it. It identifies a machine for a person to recognise and is never a
+    handle for acting on one. Times are unix seconds."""
+
+    name: str | None
+    """The machine's name, ``None`` when it has none."""
+    fingerprint: str
+    """The first 12 characters of the machine ID hash."""
+    activated_at: float
+    last_seen_at: float
+    """The machine's last activation or renewal."""
+    seat_free_at: float | None
+    """Set on a released machine whose seat the seller's policy still
+    holds, and is when that seat frees."""
+    current: bool
+    """Marks the machine the SDK is running on."""
+
 
 class Sdk:
     """Activates and renews licenses over the network, with an optional
@@ -107,6 +154,13 @@ class Sdk:
 
         self._sdk_info = {"language": "python", "version": __version__}
         self._session = requests.Session()
+        self._machine_name = config.machine_name
+        if self._machine_name is None:
+            # The name is a courtesy, so a hostname the OS will not give is no name.
+            try:
+                self._machine_name = socket.gethostname()
+            except OSError:
+                self._machine_name = ""
         self._cache_path: Path | None = None
         if config.cache:
             self._cache_path = config.cache_path or storage.default_path(parsed.key)
@@ -153,15 +207,15 @@ class Sdk:
             if public.key == sanitized or (alias != "" and alias == normalized):
                 return public
 
-        token, chain = self._post_and_handle_invalidation(
-            "/v1/activate",
-            {
-                "project_key": self._app_id,
-                "license_key": normalized,
-                "machine_id": self._machine_id,
-                "sdk": self._sdk_info,
-            },
-        )
+        body: dict[str, object] = {
+            "project_key": self._app_id,
+            "license_key": normalized,
+            "machine_id": self._machine_id,
+            "sdk": self._sdk_info,
+        }
+        if self._machine_name:
+            body["machine_name"] = self._machine_name
+        token, chain = self._post_and_handle_invalidation("/v1/activate", body)
         lic = self._verify_and_validate(token, chain)
         self._save_to_cache(token, chain)
         return lic
@@ -178,17 +232,83 @@ class Sdk:
         whatever was previously cached.
         """
         token, chain = self._post_and_handle_invalidation(
-            "/v1/renew",
-            {
-                "activation_id": activation_id,
-                "license_key": license_key,
-                "machine_id": self._machine_id,
-                "sdk": self._sdk_info,
-            },
+            "/v1/renew", self._credentials(activation_id, license_key)
         )
         lic = self._verify_and_validate(token, chain)
         self._save_to_cache(token, chain)
         return lic
+
+    def deactivate(self, activation_id: str, license_key: str) -> DeactivateResult:
+        """Releases this machine's seat so the licence can be activated on
+        another machine. Takes the same credentials as ``renew``.
+
+        It needs the network: the server releases the seat first, and only
+        once it has answered does the SDK delete the cached token (with
+        caching enabled), after which ``check`` raises
+        ``NotActivatedError`` until the next ``activate``. When the call
+        fails, the cache is kept and the call can be retried; a machine
+        that is lost or dead is released from the seller's customer portal
+        instead.
+
+        A release that already happened, on this call or an earlier one, is
+        success. When the seller's policy refuses the release, this raises
+        ``DeactivationBlockedError``.
+        """
+        resp = self._send("/v1/deactivate", self._credentials(activation_id, license_key))
+        if resp.status_code == 409:
+            # The seller's deactivation policy, never a seat limit.
+            body = _error_body(resp)
+            try:
+                available_at = _parse_time(body["available_at"])
+            except (KeyError, TypeError, ValueError):
+                available_at = None
+            raise errors.DeactivationBlockedError(
+                body.get("error") or "deactivation blocked",
+                reason=body.get("reason") or "",
+                available_at=available_at,
+            )
+        data = _decode(resp)
+        self._clear_cache()
+        try:
+            seat_free_at = data.get("seat_free_at")
+            return DeactivateResult(
+                released=bool(data.get("released")),
+                seat_free_at=_parse_time(seat_free_at) if seat_free_at else None,
+            )
+        except (AttributeError, TypeError, ValueError) as e:
+            raise errors.ServerError(f"decode response: {e}") from e
+
+    def machines(self, activation_id: str, license_key: str) -> list[Machine]:
+        """Lists the machines holding a seat on this activation's licence.
+        Takes the same credentials as ``renew`` and needs the network."""
+        data = _decode(self._send("/v1/machines", self._credentials(activation_id, license_key)))
+        try:
+            return [
+                Machine(
+                    name=m.get("machine_name") or None,
+                    fingerprint=m["machine_fingerprint"],
+                    activated_at=_parse_time(m["activated_at"]),
+                    last_seen_at=_parse_time(m["last_seen_at"]),
+                    seat_free_at=_parse_time(m["seat_free_at"]) if m.get("seat_free_at") else None,
+                    current=bool(m.get("current")),
+                )
+                for m in data["machines"]
+            ]
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            raise errors.ServerError(f"decode response: {e}") from e
+
+    def rename_machine(self, activation_id: str, license_key: str, name: str) -> str:
+        """Names this machine and returns the name as stored, trimmed.
+        Takes the same credentials as ``renew`` and needs the network. The
+        server refuses a name that is empty, longer than 64 characters or
+        holds control characters (``ServerError``)."""
+        body = self._credentials(activation_id, license_key)
+        body["machine_name"] = name
+        data = _decode(self._send("/v1/machines/rename", body))
+        try:
+            return str(data["machine_name"])
+        except (KeyError, TypeError) as e:
+            raise errors.ServerError(f"decode response: {e}") from e
 
     def check(self) -> PublicLicense:
         """Reads the cached activation for this machine without making a
@@ -217,6 +337,15 @@ class Sdk:
             raise errors.LicenseExpiredError("license expired") from e
         except (errors.VerifyError, errors.ValidateError) as e:
             raise errors.NotActivatedError("not activated on this machine") from e
+
+    def _credentials(self, activation_id: str, license_key: str) -> dict[str, object]:
+        """The request body ``renew`` and the machine calls share."""
+        return {
+            "activation_id": activation_id,
+            "license_key": license_key,
+            "machine_id": self._machine_id,
+            "sdk": self._sdk_info,
+        }
 
     def _validate_license_key(self, normalized: str) -> None:
         """A minimal local sanity check, not a format check: a license key
@@ -290,32 +419,7 @@ class Sdk:
 
     def _post(self, path: str, body: dict[str, object]) -> tuple[str, CertChain]:
         """Shared POST helper for ``activate``/``renew``."""
-        try:
-            resp = self._session.post(
-                self._base_url + path, json=body, timeout=self._timeout
-            )
-        except requests.RequestException as e:
-            raise errors.NetworkError(str(e)) from e
-
-        if not (200 <= resp.status_code < 300):
-            try:
-                msg = resp.json().get("error", "") or ""
-            except ValueError:
-                msg = ""
-            if resp.status_code == 404:
-                raise errors.LicenseNotFoundError("license not found")
-            if resp.status_code == 403:
-                raise errors.LicenseExpiredError("license inactive or expired")
-            if resp.status_code == 409:
-                raise errors.SeatLimitError("activation seat limit reached")
-            if resp.status_code == 401:
-                raise errors.InvalidProjectKeyError("invalid project key")
-            raise errors.ServerError(msg or f"HTTP {resp.status_code}")
-
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise errors.ServerError(f"decode response: {e}") from e
+        data = _decode(self._send(path, body))
 
         token = data.get("token") or ""
         chain_data = data.get("chain") or {}
@@ -331,3 +435,48 @@ class Sdk:
             project=chain_data["project"],
             daily=chain_data["daily"],
         )
+
+    def _send(self, path: str, body: dict[str, object]) -> requests.Response:
+        """POSTs ``body`` as JSON to ``path``, raising ``NetworkError`` when
+        no response arrives."""
+        try:
+            return self._session.post(self._base_url + path, json=body, timeout=self._timeout)
+        except requests.RequestException as e:
+            raise errors.NetworkError(str(e)) from e
+
+
+def _error_body(resp: requests.Response) -> dict[str, Any]:
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _decode(resp: requests.Response) -> Any:
+    """Returns the decoded JSON of a 2xx response, or raises the error its
+    status stands for."""
+    if not (200 <= resp.status_code < 300):
+        msg = _error_body(resp).get("error", "") or ""
+        if resp.status_code == 404:
+            raise errors.LicenseNotFoundError("license not found")
+        if resp.status_code == 403:
+            raise errors.LicenseExpiredError("license inactive or expired")
+        if resp.status_code == 409:
+            raise errors.SeatLimitError("activation seat limit reached")
+        if resp.status_code == 401:
+            raise errors.InvalidProjectKeyError("invalid project key")
+        raise errors.ServerError(msg or f"HTTP {resp.status_code}")
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise errors.ServerError(f"decode response: {e}") from e
+
+
+def _parse_time(value: str) -> float:
+    """Parses an RFC 3339 timestamp into unix seconds. Before Python 3.11,
+    ``fromisoformat`` reads neither ``Z`` nor a fraction of other than 3 or
+    6 digits, so both are rewritten first."""
+    value = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), value)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()

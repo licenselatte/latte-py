@@ -18,6 +18,7 @@ from . import appid, domain, entitlements, errors, http, key, machineid, validat
 from .domain import CertChain
 from .entitlements import UNLIMITED, EntitlementValue
 from .errors import (
+    DeactivationBlockedError,
     InvalidKeyError,
     InvalidProjectKeyError,
     LatteError,
@@ -31,7 +32,7 @@ from .errors import (
     ValidateError,
     VerifyError,
 )
-from .http import Config, Sdk
+from .http import Config, DeactivateResult, Machine, Sdk
 from .license import PublicLicense, check_license, check_license_at
 from .verify import MASTER_PUBLIC_KEYS
 
@@ -63,6 +64,8 @@ __all__ = [
     "EntitlementValue",
     "UNLIMITED",
     "Sdk",
+    "DeactivateResult",
+    "Machine",
     "PublicLicense",
     "check_license_at",
     "check_license",
@@ -73,6 +76,7 @@ __all__ = [
     "LicenseExpiredError",
     "NotActivatedError",
     "SeatLimitError",
+    "DeactivationBlockedError",
     "LicenseNotFoundError",
     "MachineIdError",
     "InvalidProjectKeyError",

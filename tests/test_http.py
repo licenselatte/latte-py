@@ -1,4 +1,5 @@
-"""Tests for `Sdk.activate`/`Sdk.renew`/`Sdk.check` against a mocked
+"""Tests for `Sdk.activate`/`Sdk.renew`/`Sdk.check` and the machine calls
+(`deactivate`/`machines`/`rename_machine`) against a mocked
 LicenseLatte API (`responses`), covering:
   - the exact wire request shape for activate/renew
   - status-code -> sentinel error mapping
@@ -26,10 +27,16 @@ format/atomicity in isolation, with no key material involved at all.
 
 from __future__ import annotations
 
+import calendar
+import json
+import socket
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import responses
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import latte
 from latte import errors, machineid, storage
@@ -49,10 +56,14 @@ BASE_URL = "https://mock.invalid"
 SDK_INFO = {"language": "python", "version": latte.__version__}
 
 
-def make_sdk(cache_path: Path) -> Sdk:
+def make_sdk(cache_path: Path, machine_name: str | None = "") -> Sdk:
     return Sdk(
         Config(
-            app_id=TEST_APP_ID, machine_id=TEST_MACHINE_ID, base_url=BASE_URL, cache_path=cache_path
+            app_id=TEST_APP_ID,
+            machine_id=TEST_MACHINE_ID,
+            base_url=BASE_URL,
+            cache_path=cache_path,
+            machine_name=machine_name,
         )
     )
 
@@ -366,3 +377,215 @@ def test_activate_leaves_an_existing_cache_entry_alone_on_an_unrelated_server_er
     # went wrong: an existing cache entry (unverifiable or not) shouldn't
     # be touched over it.
     assert cache_path.exists()
+
+
+# --- machine calls ---
+
+ACTIVATION_ID = "11111111-1111-1111-1111-111111111111"
+CREDENTIALS = {
+    "activation_id": ACTIVATION_ID,
+    "license_key": TEST_LICENSE_KEY,
+    "machine_id": TEST_DERIVED_MACHINE_ID,
+    "sdk": SDK_INFO,
+}
+
+
+def activated_sdk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Sdk, Path]:
+    """An Sdk whose cache holds a licence ``check`` accepts: a shared test
+    vector, with the SDK's master key, machine ID and clock set to the
+    vector's."""
+    vector = json.loads(
+        (Path(__file__).parent.parent / "testdata/vectors/entitlements_absent.json").read_text()
+    )
+    cache_path = tmp_path / "cache.json"
+    storage.save(cache_path, vector["token"], CertChain(**vector["chain"]))
+    sdk = make_sdk(cache_path)
+    sdk._master_pub = Ed25519PublicKey.from_public_bytes(
+        bytes.fromhex(vector["master_public_key_hex"])
+    )
+    sdk._machine_id = vector["machine_id"]
+    now = calendar.timegm(time.strptime(vector["now"], "%Y-%m-%dT%H:%M:%SZ"))
+    monkeypatch.setattr(latte.http, "time", SimpleNamespace(time=lambda: float(now)))
+    sdk.check()
+    return sdk, cache_path
+
+
+@responses.activate
+def test_deactivate_sends_renews_credentials_and_forgets_the_token(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache.json"
+    storage.save(cache_path, "not-a-real-jwt", garbage_chain())
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/deactivate",
+        json={"released": True, "seat_free_at": "2026-10-21T09:00:00Z"},
+        match=[responses.matchers.json_params_matcher(CREDENTIALS)],
+    )
+
+    res = make_sdk(cache_path).deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    assert res == latte.DeactivateResult(released=True, seat_free_at=1792573200.0)
+    assert storage.load(cache_path) is None
+
+
+@pytest.mark.parametrize("released", [True, False])
+@responses.activate
+def test_deactivate_success_makes_check_report_not_activated(
+    released: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _ = activated_sdk(tmp_path, monkeypatch)
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/deactivate",
+        json={"released": released, "seat_free_at": None},
+    )
+
+    res = sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    assert res == latte.DeactivateResult(released=released, seat_free_at=None)
+    with pytest.raises(errors.NotActivatedError):
+        sdk.check()
+
+
+@responses.activate
+def test_deactivate_network_failure_keeps_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _ = activated_sdk(tmp_path, monkeypatch)
+
+    with pytest.raises(errors.NetworkError):
+        sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    sdk.check()
+
+
+@responses.activate
+def test_deactivate_policy_refusal_keeps_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _ = activated_sdk(tmp_path, monkeypatch)
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/deactivate",
+        json={
+            "error": "Wait a week.",
+            "reason": "deactivation_cooldown",
+            "available_at": "2026-10-21T09:00:00Z",
+        },
+        status=409,
+    )
+
+    with pytest.raises(latte.DeactivationBlockedError) as exc:
+        sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    assert str(exc.value) == "Wait a week."
+    assert exc.value.reason == "deactivation_cooldown"
+    assert exc.value.available_at == 1792573200.0
+    sdk.check()
+
+
+@responses.activate
+def test_deactivate_inactive_license_keeps_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _ = activated_sdk(tmp_path, monkeypatch)
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/deactivate",
+        json={"error": "license is inactive or expired", "reason": "license_suspended"},
+        status=403,
+    )
+
+    with pytest.raises(errors.LicenseExpiredError):
+        sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    sdk.check()
+
+
+@responses.activate
+def test_machines_parses_the_list(tmp_path: Path) -> None:
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/machines",
+        json={
+            "machines": [
+                {
+                    "machine_name": "Studio",
+                    "machine_fingerprint": "9f1c4a0b2d3e",
+                    "activated_at": "2026-10-01T00:00:00Z",
+                    "last_seen_at": "2026-10-14T00:00:00.123456789Z",
+                    "current": True,
+                },
+                {
+                    "machine_fingerprint": "0a1b2c3d4e5f",
+                    "activated_at": "2026-09-01T00:00:00Z",
+                    "last_seen_at": "2026-09-02T00:00:00.5+02:00",
+                    "seat_free_at": "2026-10-20T00:00:00Z",
+                    "current": False,
+                },
+            ]
+        },
+        match=[responses.matchers.json_params_matcher(CREDENTIALS)],
+    )
+
+    machines = make_sdk(tmp_path / "cache.json").machines(ACTIVATION_ID, TEST_LICENSE_KEY)
+
+    assert machines == [
+        latte.Machine(
+            name="Studio",
+            fingerprint="9f1c4a0b2d3e",
+            activated_at=1790812800.0,
+            last_seen_at=1791936000.123456,
+            seat_free_at=None,
+            current=True,
+        ),
+        latte.Machine(
+            name=None,
+            fingerprint="0a1b2c3d4e5f",
+            activated_at=1788220800.0,
+            last_seen_at=1788300000.5,
+            seat_free_at=1792454400.0,
+            current=False,
+        ),
+    ]
+
+
+@responses.activate
+def test_rename_machine_sends_the_name_and_returns_the_stored_one(tmp_path: Path) -> None:
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/machines/rename",
+        json={"machine_name": "Studio Mac"},
+        match=[
+            responses.matchers.json_params_matcher({**CREDENTIALS, "machine_name": " Studio Mac "})
+        ],
+    )
+
+    sdk = make_sdk(tmp_path / "cache.json")
+    assert sdk.rename_machine(ACTIVATION_ID, TEST_LICENSE_KEY, " Studio Mac ") == "Studio Mac"
+
+
+@pytest.mark.parametrize(
+    ("configured", "sent"),
+    [("Studio Mac", "Studio Mac"), (None, socket.gethostname()), ("", None)],
+)
+@responses.activate
+def test_activate_sends_the_machine_name(
+    configured: str | None, sent: str | None, tmp_path: Path
+) -> None:
+    body = {
+        "project_key": TEST_APP_ID,
+        "license_key": TEST_LICENSE_KEY,
+        "machine_id": TEST_DERIVED_MACHINE_ID,
+        "sdk": SDK_INFO,
+    }
+    if sent is not None:
+        body["machine_name"] = sent
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/v1/activate",
+        status=401,
+        match=[responses.matchers.json_params_matcher(body)],
+    )
+
+    with pytest.raises(errors.InvalidProjectKeyError):
+        make_sdk(tmp_path / "cache.json", machine_name=configured).activate(TEST_LICENSE_KEY)

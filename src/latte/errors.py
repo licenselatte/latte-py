@@ -102,7 +102,7 @@ class InvalidChecksumError(AppIdError):
 
 class LatteError(Exception):
     """Base class for errors raised by ``Sdk`` (``activate``, ``renew``,
-    ``check``).
+    ``check`` and the machine calls).
 
     Distinct from ``VerifyError``/``ValidateError`` (chain/grace-period
     failures on an already-fetched token): these are failures of
@@ -144,6 +144,23 @@ class LicenseNotFoundError(LatteError):
 
 class InvalidProjectKeyError(LatteError):
     """Server returned 401 (invalid project key)."""
+
+
+class DeactivationBlockedError(LatteError):
+    """``deactivate`` refused by the seller's deactivation policy: a machine
+    on this licence was released too recently, or the licence has used its
+    releases for the year. Nothing was released and the cache is kept.
+
+    ``str(e)`` explains the refusal and is written to be shown to the user.
+    ``reason`` is ``"deactivation_cooldown"`` or
+    ``"deactivation_limit_reached"``; ``available_at`` is when (unix seconds)
+    a release becomes possible, ``None`` when not known.
+    """
+
+    def __init__(self, message: str, reason: str, available_at: float | None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.available_at = available_at
 
 
 class NetworkError(LatteError):

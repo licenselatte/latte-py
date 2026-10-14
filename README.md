@@ -133,6 +133,72 @@ except NotActivatedError:
     print("not activated, call activate()")
 ```
 
+## Releasing this machine, and listing and naming machines
+
+These calls need the network and take the same `activation_id` and
+`license_key` as `renew`:
+
+```python
+def deactivate(self, activation_id: str, license_key: str) -> DeactivateResult
+def machines(self, activation_id: str, license_key: str) -> list[Machine]
+def rename_machine(self, activation_id: str, license_key: str, name: str) -> str
+
+@dataclass(frozen=True)
+class DeactivateResult:
+    released: bool               # False when it was already released; still success
+    seat_free_at: float | None   # unix seconds, set when the seller holds the seat until then
+
+@dataclass(frozen=True)
+class Machine:
+    name: str | None
+    fingerprint: str             # first 12 characters of the machine ID hash
+    activated_at: float          # unix seconds
+    last_seen_at: float          # last activation or renewal
+    seat_free_at: float | None   # set on a released machine whose seat is still held
+    current: bool                # the machine this SDK is running on
+```
+
+`deactivate` releases this machine's seat so the licence can be activated on
+another machine: the "Deactivate" button in your app. The SDK asks the server
+to release the seat first and deletes the cached token only once the server
+has answered, so `check` raises `NotActivatedError` afterwards until the next
+`activate`. If the call fails, nothing changes locally and the user can try
+again; the seat is never lost to a dropped connection. Repeating a release
+that already went through is success. A machine that is lost, dead or wiped
+cannot call this; its seat is released from the seller's customer portal
+instead.
+
+On plans with the deactivation policy engine the seller may limit releases.
+A refusal raises `DeactivationBlockedError`, whose message is written for the
+user, whose `reason` is `"deactivation_cooldown"` or
+`"deactivation_limit_reached"`, and whose `available_at` (unix seconds, or
+`None`) says when to try again. The seller may also hold the freed seat until
+this machine's last token has expired, which `seat_free_at` reports.
+
+```python
+from latte import DeactivationBlockedError, LatteError
+
+try:
+    sdk.deactivate(activation_id, license_key)
+    print("This machine is released.")
+except DeactivationBlockedError as e:
+    print(e)
+except LatteError:
+    print("Could not reach the licence server. Nothing was changed; try again when online.")
+```
+
+`machines` lists the machines holding a seat on the licence, for showing the
+customer where it is in use; it cannot release another machine, which is the
+customer portal's job. `rename_machine` names this machine and returns the
+name as stored, trimmed; the server refuses a name that is empty, longer than
+64 characters or holds control characters (`ServerError`). Both raise
+`LicenseExpiredError` when this machine's activation is no longer active.
+
+A machine is named after its hostname (`socket.gethostname()`) when it
+activates. `Config(machine_name="...")` sends another name and
+`Config(machine_name="")` sends none. A name set later with `rename_machine`
+is kept on re-activation.
+
 ## The cache file
 
 By default, `Sdk` stores an activated license as a small JSON file under
