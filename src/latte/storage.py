@@ -56,11 +56,13 @@ def load(path: Path) -> tuple[str, CertChain] | None:
         return None
 
     try:
-        return data["token"], CertChain(
-            submaster=data["submaster"], project=data["project"], daily=data["daily"]
-        )
+        fields = [data[k] for k in ("token", "submaster", "project", "daily")]
     except (KeyError, TypeError):
         return None
+    if not all(isinstance(f, str) for f in fields):
+        return None
+    token, submaster, project, daily = fields
+    return token, CertChain(submaster=submaster, project=project, daily=daily)
 
 
 def save(path: Path, token: str, chain: CertChain) -> None:
