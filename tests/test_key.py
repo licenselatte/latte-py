@@ -32,6 +32,7 @@ def test_parse_app_id_happy_path():
     parsed = appid.parse_app_id(f"pk_live_{data}{checksum}")
     assert parsed.env == "live"
     assert parsed.base_url == "https://api.licenselatte.com"
+    assert appid.parse_app_id(f"pk_test_{data}{checksum}").base_url == parsed.base_url
 
 
 def test_parse_app_id_local_environment_is_supported():

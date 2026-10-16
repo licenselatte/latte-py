@@ -12,7 +12,7 @@ from .key import validate_key
 
 _BASE_URLS = {
     "live": "https://api.licenselatte.com",
-    "test": "https://test.api.licenselatte.com",
+    "test": "https://api.licenselatte.com",
     "local": "http://localhost:8080",
 }
 
