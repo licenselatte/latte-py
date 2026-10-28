@@ -319,3 +319,26 @@ def test_cached_token_round_trips_in_both_formats(tmp_path, claims):
     assert verify.verify_activation_at(master, cached_token, cached_chain, float(now)) == (
         verify.verify_activation_at(master, token, c.chain, float(now))
     )
+
+
+def test_ignore_expiry_verifies_a_chain_whose_certs_have_expired():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(c.daily, activation_claims(now))
+    later = float(now + 600_000)  # past the project cert's exp
+    with pytest.raises(errors.ExpiredError):
+        verify.verify_activation_at(c.master.public_key(), token, c.chain, later)
+    lic = verify.verify_activation_at(
+        c.master.public_key(), token, c.chain, later, ignore_expiry=True
+    )
+    assert lic.activation_id == "ACT1"
+
+
+def test_ignore_expiry_still_checks_the_signature():
+    now = 10_000_000
+    c = Chain(now)
+    token = sign_jwt(Ed25519PrivateKey.generate(), activation_claims(now))
+    with pytest.raises(errors.InvalidSignatureError):
+        verify.verify_activation_at(
+            c.master.public_key(), token, c.chain, float(now), ignore_expiry=True
+        )
