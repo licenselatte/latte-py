@@ -77,7 +77,9 @@ def _pub_key_from_cert(claims: dict[str, Any], field: str) -> Ed25519PublicKey:
         raise errors.InvalidClaimError(field, str(e)) from e
 
 
-def _verify_submaster(cert: str, master_pub: MasterKeys, now: float) -> ParsedJwt:
+def _verify_submaster(
+    cert: str, master_pub: MasterKeys, now: float, check_exp: bool = True
+) -> ParsedJwt:
     """Verifies the submaster cert under the first master key it verifies
     under. If none does, raises the error from the first key tried.
     """
@@ -87,7 +89,7 @@ def _verify_submaster(cert: str, master_pub: MasterKeys, now: float) -> ParsedJw
     first_error: errors.VerifyError | None = None
     for key in keys:
         try:
-            return parse_and_verify(cert, key, _ISSUER, now)
+            return parse_and_verify(cert, key, _ISSUER, now, check_exp=check_exp)
         except errors.VerifyError as e:
             first_error = first_error or e
     assert first_error is not None
@@ -99,9 +101,15 @@ def verify_activation_at(
     token: str,
     chain: CertChain,
     now: float,
+    ignore_expiry: bool = False,
 ) -> License:
     """Verifies the full chain and the activation token, evaluating
     time-based claims as of ``now`` (unix seconds).
+
+    ``ignore_expiry`` skips the ``exp`` check of the submaster and project
+    certs, for deciding whether a token whose chain has lapsed is still
+    worth renewing. Signatures, issuers, ``iat`` and every cross-check
+    still apply.
 
     ``master_pub`` is one key or a sequence of them (``MASTER_PUBLIC_KEYS``
     is the set ``Sdk`` uses); the chain is accepted if its submaster cert
@@ -111,11 +119,11 @@ def verify_activation_at(
     pinned ``now`` so results are reproducible.
     """
     # Step 1: submaster cert, signed by one of the master keys.
-    sub = _verify_submaster(chain.submaster, master_pub, now)
+    sub = _verify_submaster(chain.submaster, master_pub, now, not ignore_expiry)
     submaster_pub = _pub_key_from_cert(sub.claims, "spk")
 
     # Step 2: project cert, signed by submaster.
-    proj = parse_and_verify(chain.project, submaster_pub, _ISSUER, now)
+    proj = parse_and_verify(chain.project, submaster_pub, _ISSUER, now, check_exp=not ignore_expiry)
     project_pub = _pub_key_from_cert(proj.claims, "ppk")
 
     # Step 3: daily cert, signed by project key. Its exp is not checked

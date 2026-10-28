@@ -79,12 +79,30 @@ def test_perpetual_fixed_is_held_to_the_grace_deadline():
 
 def test_in_grace_period_false_before_60_minute_marker():
     lic = make_license(issued_at=NOW_ANCHOR - 30 * 60)
-    assert not validate.in_grace_period(lic, NOW_ANCHOR)
+    assert not validate.in_grace_period(lic, NOW_ANCHOR, renewal_failed=True)
 
 
-def test_in_grace_period_true_between_60_minutes_and_deadline():
+def test_in_grace_period_true_between_60_minutes_and_deadline_after_a_failed_renewal():
     lic = make_license(issued_at=NOW_ANCHOR - 2 * 60 * 60)
-    assert validate.in_grace_period(lic, NOW_ANCHOR)
+    assert validate.in_grace_period(lic, NOW_ANCHOR, renewal_failed=True)
+
+
+def test_in_grace_period_false_for_a_stale_token_without_a_failed_renewal():
+    lic = make_license(issued_at=NOW_ANCHOR - 2 * 60 * 60)
+    assert not validate.in_grace_period(lic, NOW_ANCHOR, renewal_failed=False)
+
+
+def test_in_grace_period_is_strict_at_the_60_minute_marker():
+    lic = make_license(issued_at=NOW_ANCHOR - 60 * 60)
+    assert not validate.in_grace_period(lic, NOW_ANCHOR, renewal_failed=True)
+    assert validate.in_grace_period(lic, NOW_ANCHOR + 1, renewal_failed=True)
+
+
+def test_in_grace_period_is_strict_at_the_grace_deadline():
+    lic = make_license()
+    deadline = lic.issued_at + lic.grace_period_secs
+    assert not validate.in_grace_period(lic, deadline, renewal_failed=True)
+    assert validate.in_grace_period(lic, deadline - 1, renewal_failed=True)
 
 
 def test_is_valid_matches_boundary():

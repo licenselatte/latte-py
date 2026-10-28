@@ -16,15 +16,18 @@ has nothing left to do (use ``verify.verify_activation_at``/
 ``validate.validate_at`` directly if you want to supply your own HTTP
 client instead).
 
-``activate``/``renew`` always go over the network on a cache miss; there's
-no background renewal thread here: call ``renew`` yourself on whatever
-schedule fits your application.
+``activate``/``renew`` always go over the network on a cache miss. ``check``
+renews in the background: once the cached token is an hour old it starts a
+daemon thread that calls ``/v1/renew``, at most once every five minutes and
+never while another renewal is running, without ever making ``check`` wait.
+``renew`` stays available for a schedule of your own.
 """
 
 from __future__ import annotations
 
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,11 +38,24 @@ import requests
 
 from . import errors, machineid, storage, validate, verify
 from .appid import parse_app_id
-from .domain import CertChain
+from .domain import CertChain, License
 from .key import normalize_key, sanitize_key
 from .license import PublicLicense, _to_public_license, check_license_at
 
 _DEFAULT_TIMEOUT = 30.0
+
+# A background renewal starts once the cached token is this old, and no more
+# often than every _MIN_RENEW_INTERVAL_SECS.
+_RENEW_AFTER_SECS = validate._MAX_RENEWAL_TIME_SECS
+_MIN_RENEW_INTERVAL_SECS = 5 * 60
+
+# What check() rejects a signed token for when only time has passed.
+_LAPSED_ERRORS = (
+    errors.ExpiredError,
+    errors.HardExpiredError,
+    errors.GraceExpiredError,
+    errors.LicenseTooOldError,
+)
 
 _INVALIDATING_ERRORS = (
     errors.LicenseNotFoundError,
@@ -161,6 +177,18 @@ class Sdk:
                 self._machine_name = socket.gethostname()
             except OSError:
                 self._machine_name = ""
+        # Guards the cache file, so a background renewal's check-then-write
+        # is atomic against deactivate and manual renew.
+        self._cache_lock = threading.RLock()
+        # Guards the next three fields; never held across a network call.
+        # ``_renewal_failed`` is in memory only: the last renewal of the
+        # cached activation could not reach the server and nothing has
+        # succeeded since.
+        self._renew_lock = threading.Lock()
+        self._renew_in_flight = False
+        self._last_renew_attempt = 0.0
+        self._renewal_failed = False
+        self._renew_thread: threading.Thread | None = None
         self._cache_path: Path | None = None
         if config.cache:
             self._cache_path = config.cache_path or storage.default_path(parsed.key)
@@ -218,6 +246,7 @@ class Sdk:
         token, chain = self._post_and_handle_invalidation("/v1/activate", body)
         lic = self._verify_and_validate(token, chain)
         self._save_to_cache(token, chain)
+        self._reset_renewal_failed()
         return lic
 
     def renew(self, activation_id: str, license_key: str) -> PublicLicense:
@@ -229,13 +258,25 @@ class Sdk:
         ``PublicLicense.activation_id``). Also unlike ``activate``'s
         request, the wire request here carries no project-key field. On
         success, and with caching enabled, the renewed token replaces
-        whatever was previously cached.
+        whatever was previously cached. It counts as a renewal attempt for
+        the background schedule of ``check``.
+
+        A ``NetworkError`` here makes ``check`` report ``in_grace_period``
+        until a renewal gets through, and any other outcome clears it; see
+        ``PublicLicense.in_grace_period``.
         """
-        token, chain = self._post_and_handle_invalidation(
-            "/v1/renew", self._credentials(activation_id, license_key)
-        )
-        lic = self._verify_and_validate(token, chain)
+        with self._renew_lock:
+            self._last_renew_attempt = time.time()
+        try:
+            token, chain = self._post_and_handle_invalidation(
+                "/v1/renew", self._credentials(activation_id, license_key)
+            )
+            lic = self._verify_and_validate(token, chain)
+        except Exception as e:
+            self._note_failed_renewal(activation_id, e)
+            raise
         self._save_to_cache(token, chain)
+        self._set_renewal_failed(activation_id, False)
         return lic
 
     def deactivate(self, activation_id: str, license_key: str) -> DeactivateResult:
@@ -323,6 +364,19 @@ class Sdk:
         (out of its grace window, too old, or for a different machine ID):
         those don't get their own exception because the caller's
         correct response to all of them is the same: activate again.
+
+        When the cached token is an hour old or more, ``check`` also starts a
+        renewal on a daemon thread and returns without waiting for it: at
+        most one at a time and one attempt per five minutes. A renewal the
+        server rejects as invalid or inactive clears the cache, so the next
+        ``check`` raises ``NotActivatedError``; a success replaces the
+        cached token; every other failure is ignored and the cached token
+        stays valid until its grace deadline.
+
+        ``in_grace_period`` on the result is true only after a renewal could
+        not reach the server (see ``PublicLicense.in_grace_period``), so
+        ``check`` after a renewal attempt shows its outcome. It is
+        advisory: gate features on the verdict, never on the flag.
         """
         if self._cache_path is None:
             raise errors.NotActivatedError("not activated on this machine")
@@ -331,12 +385,113 @@ class Sdk:
             raise errors.NotActivatedError("not activated on this machine")
 
         token, chain = cached
+        now = time.time()
         try:
-            return check_license_at(self._master_pub, token, chain, self._machine_id, time.time())
-        except errors.HardExpiredError as e:
-            raise errors.LicenseExpiredError("license expired") from e
+            with self._renew_lock:
+                renewal_failed = self._renewal_failed
+            lic = check_license_at(
+                self._master_pub, token, chain, self._machine_id, now, renewal_failed
+            )
+        except _LAPSED_ERRORS as e:
+            self._renew_lapsed(token, chain, now)
+            if isinstance(e, errors.HardExpiredError):
+                raise errors.LicenseExpiredError("license expired") from e
+            raise errors.NotActivatedError("not activated on this machine") from e
         except (errors.VerifyError, errors.ValidateError) as e:
             raise errors.NotActivatedError("not activated on this machine") from e
+        self._renew_in_background(lic, now)
+        return lic
+
+    def _renew_lapsed(self, token: str, chain: CertChain, now: float) -> None:
+        """Starts a renewal for a token ``check`` rejected only because time
+        has passed, so a computer that was off past the grace window recovers
+        by itself. The signature chain and the machine ID must still hold,
+        and the activation and key come from the signed token."""
+        try:
+            lic = verify.verify_activation_at(
+                self._master_pub, token, chain, now, ignore_expiry=True
+            )
+        except errors.VerifyError:
+            return
+        if lic.machine_id == self._machine_id:
+            self._renew_in_background(lic, now)
+
+    def _renew_in_background(self, lic: PublicLicense | License, now: float) -> None:
+        """Starts a renewal thread for ``lic`` if it is due and none is
+        running."""
+        if now - lic.issued_at < _RENEW_AFTER_SECS:
+            return
+        with self._renew_lock:
+            if self._renew_in_flight or now - self._last_renew_attempt < _MIN_RENEW_INTERVAL_SECS:
+                return
+            self._renew_in_flight = True
+            self._last_renew_attempt = now
+        self._renew_thread = threading.Thread(
+            target=self._background_renew, args=(lic.activation_id, lic.key), daemon=True
+        )
+        self._renew_thread.start()
+
+    def _background_renew(self, activation_id: str, license_key: str) -> None:
+        """Renews ``activation_id`` and touches the cache only while it
+        still holds that activation. Nothing escapes: the cached token stays
+        valid until its grace deadline."""
+        try:
+            try:
+                token, chain = self._post(
+                    "/v1/renew", self._credentials(activation_id, license_key)
+                )
+                self._verify_and_validate(token, chain)
+            except _INVALIDATING_ERRORS:
+                with self._cache_lock:
+                    if self._cache_holds(activation_id):
+                        self._clear_cache()
+                return
+            except Exception as e:  # noqa: BLE001 - any other failure is noted, not raised
+                self._note_failed_renewal(activation_id, e)
+                return
+            with self._cache_lock:
+                if self._cache_holds(activation_id):
+                    self._save_to_cache(token, chain)
+                    self._set_renewal_failed(activation_id, False)
+        except Exception:  # noqa: BLE001, S110 - nothing may escape the thread
+            pass
+        finally:
+            with self._renew_lock:
+                self._renew_in_flight = False
+
+    def _note_failed_renewal(self, activation_id: str, error: Exception) -> None:
+        """Records how a renewal of ``activation_id`` failed: only a
+        transport failure means the server was not reached."""
+        self._set_renewal_failed(activation_id, isinstance(error, errors.NetworkError))
+
+    def _set_renewal_failed(self, activation_id: str, failed: bool) -> None:
+        """Sets ``_renewal_failed``, but only while the cache still holds
+        ``activation_id``: an attempt that outlived its activation says
+        nothing about the current one."""
+        with self._cache_lock:
+            if self._cache_holds(activation_id):
+                with self._renew_lock:
+                    self._renewal_failed = failed
+
+    def _reset_renewal_failed(self) -> None:
+        with self._renew_lock:
+            self._renewal_failed = False
+
+    def _cache_holds(self, activation_id: str) -> bool:
+        """Whether the cache holds a signed token for ``activation_id``, even
+        one whose certs have expired."""
+        if self._cache_path is None:
+            return False
+        cached = storage.load(self._cache_path)
+        if cached is None:
+            return False
+        try:
+            lic = verify.verify_activation_at(
+                self._master_pub, *cached, time.time(), ignore_expiry=True
+            )
+        except errors.VerifyError:
+            return False
+        return lic.activation_id == activation_id
 
     def _credentials(self, activation_id: str, license_key: str) -> dict[str, object]:
         """The request body ``renew`` and the machine calls share."""
@@ -376,7 +531,9 @@ class Sdk:
             validate.validate_at(lic, self._machine_id, now)
         except (errors.VerifyError, errors.ValidateError):
             return None
-        public = _to_public_license(lic, validate.in_grace_period(lic, now))
+        with self._renew_lock:
+            renewal_failed = self._renewal_failed
+        public = _to_public_license(lic, validate.in_grace_period(lic, now, renewal_failed))
         return public, lic.alias
 
     def _save_to_cache(self, token: str, chain: CertChain) -> None:
@@ -384,14 +541,17 @@ class Sdk:
             # Best-effort: a local write failure shouldn't turn a
             # successful network activation into an error.
             try:
-                storage.save(self._cache_path, token, chain)
+                with self._cache_lock:
+                    storage.save(self._cache_path, token, chain)
             except OSError:
                 pass
 
     def _clear_cache(self) -> None:
         if self._cache_path is not None:
             try:
-                storage.clear(self._cache_path)
+                with self._cache_lock:
+                    self._reset_renewal_failed()
+                    storage.clear(self._cache_path)
             except OSError:
                 pass
 

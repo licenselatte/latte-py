@@ -92,10 +92,15 @@ def test_fixture(fixture: dict) -> None:
         f"expected rejection for {fixture['name']} but verify+validate both succeeded"
     )
 
-    in_grace = validate.in_grace_period(lic, now)
+    renewal_failed = fixture.get("renewal_failed", False)
+    in_grace = validate.in_grace_period(lic, now, renewal_failed)
     assert in_grace == fixture["expect_in_grace_period"], (
         f"in_grace_period mismatch for {fixture['name']}: got {in_grace}, "
         f"want {fixture['expect_in_grace_period']}"
+    )
+    age = now - lic.issued_at
+    assert in_grace == (renewal_failed and 60 * 60 < age < lic.grace_period_secs), (
+        f"in_grace_period breaks the contract formula for {fixture['name']}"
     )
 
     # Through _to_public_license rather than the decoder directly, so this

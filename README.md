@@ -81,7 +81,7 @@ try:
     lic = sdk.activate("USER-PROVIDED-LICENSE-KEY")
     print("license OK, expires", lic.expires_at)
     if lic.in_grace_period:
-        print("warning: offline a while, please reconnect soon")
+        print("Couldn't reach the licence server. Connect to the internet to keep using the app.")
     # Keep lic.activation_id around (in your own storage) so you can call
     # sdk.renew(lic.activation_id, ...) later.
 except LatteError as e:
@@ -90,10 +90,70 @@ except LatteError as e:
 
 By default, a successful `activate`/`renew` is written to an on-disk
 cache, and a later `activate` call for the same key returns the cached
-result without a network round trip as long as it's still valid. There's
-no background renewal: call `renew` yourself on whatever schedule fits
-your application. Set `Config(cache=False)` to disable the cache entirely
-(e.g. a sandboxed environment with no writable filesystem).
+result without a network round trip as long as it's still valid. Set
+`Config(cache=False)` to disable the cache entirely (e.g. a sandboxed
+environment with no writable filesystem).
+
+## Background renewal
+
+`Sdk.check()` verifies the cached token offline and returns at once. When
+that token is an hour old or more, `check()` also starts one renewal on a
+daemon thread (it never keeps your process alive and never makes `check()`
+wait), at most once every five minutes and never two at a time:
+
+- **Success:** the renewed token replaces the cached one.
+- **Rejected as invalid or inactive** (licence not found, expired or
+  deactivated, wrong project key): the local cache is cleared, so the next
+  `check()` raises `NotActivatedError`. A seller deactivating a licence in
+  the dashboard therefore takes effect at the next renewal attempt.
+- **Anything else** (no network, a server error, an unusable response):
+  ignored. The cached token stays valid until its grace deadline and the
+  next attempt is at least five minutes away.
+
+Calling `renew` yourself still works and counts as an attempt for this
+schedule.
+
+A computer that was off longer than the grace window recovers by itself. The
+first `check()` after launch raises `NotActivatedError` (or
+`LicenseExpiredError`) because the cached token is past its grace deadline,
+but if that token's signature chain still verifies and it belongs to this
+machine, `check()` starts the same background renewal. When the machine is
+online, a `check()` a few seconds later succeeds. Hosts should re-check
+rather than send the user to activate again. A token that fails signature
+verification or belongs to another machine never causes a network call.
+
+### `in_grace_period`
+
+`PublicLicense.in_grace_period` is true when the licence is still valid on
+cached data, the SDK has tried to renew it and could not reach the server,
+and the offline grace window has not run out. Formally:
+`renewal_failed and 60 min < age < grace_period`, where `renewal_failed` is
+an in-memory flag on the `Sdk` that a background or manual renewal sets when
+it fails to reach the server (a transport error) and any other outcome
+clears. It is never saved to disk, and `check()` only reads it, so `check()`
+stays offline and no slower.
+
+| Situation | `check()` | `in_grace_period` |
+| --- | --- | --- |
+| Token under 60 minutes old | licence | `False` |
+| Token over 60 minutes old, no renewal has failed | licence | `False` (the SDK is renewing, or has not yet) |
+| A renewal could not reach the server, grace window not over | licence | `True`: show "Couldn't reach the licence server. Connect to the internet to keep using the app." |
+| A renewal could not reach the server, grace window over | raises `NotActivatedError` | n/a: show "reconnect to continue" |
+| A renewal was rejected as invalid or inactive | raises `NotActivatedError` (the cache is cleared) | n/a: show "licence deactivated", never "connect to the internet" |
+
+A server error (5xx, 429), an undecodable response or a renewed token that
+fails local verification counts as reaching the server: the licence is kept,
+the flag is cleared and the next attempt comes at least five minutes later.
+
+The flag changes only when a renewal attempt ends, so call `check()` again
+after a renewal rather than relying on the value you read at startup. It is
+advisory: gate features on the `check()` verdict, never on `in_grace_period`.
+Concurrent renewals (a manual `renew` alongside a background one) are
+last-writer-wins on the flag.
+
+Deactivating a licence in the dashboard takes effect at the next renewal
+attempt. A rejected renewal clears the local cache, so the following
+`check()` returns not-activated.
 
 ## The machine ID
 
@@ -234,8 +294,6 @@ chain = CertChain(submaster=..., project=..., daily=...)
 try:
     lic = check_license(MASTER_PUBLIC_KEYS, token, chain, sdk.machine_id)
     print("license OK, expires", lic.expires_at)
-    if lic.in_grace_period:
-        print("warning: offline a while, please reconnect soon")
 except VerifyError as e:
     print("could not verify license:", e)  # chain/signature/format problem
 except ValidateError as e:
@@ -284,11 +342,14 @@ rules above apply unchanged. The token's `exp` is never enforced while
 verifying the signature chain; it is enforced only here, as these two
 errors.
 
-`PublicLicense.in_grace_period` is a softer, earlier warning signal: it
-turns `True` once more than 60 minutes have passed since the last
-issuance/renewal without a fresh one arriving, while still inside the grace
-window: surface it as a "please reconnect soon" hint, distinct from an
-outright rejection.
+`PublicLicense.in_grace_period` is a softer, earlier warning signal for a
+licence that is still accepted: it is true when the licence is still valid
+on cached data, the SDK has tried to renew it and could not reach the
+server, and the offline grace window has not run out. Surface it as a
+"connect to the internet" hint, distinct from an outright rejection. Age
+alone never sets it; see "Background renewal" for the state table.
+`check_license_at` takes an optional `renewal_failed` argument (default
+`False`), so the pure functions report `False` unless you pass it.
 
 ## Entitlements
 
@@ -362,9 +423,10 @@ it server-side.
 
 ## What this package does *not* do
 
-Background renewal scheduling is intentionally out of scope. There's no
-scheduler here: `Sdk.renew` is the building block; call it on a timer, in
-response to a UI action, or whatever fits your application.
+Renewal is automatic only through `Sdk.check()` (see "Background
+renewal"). There's no scheduler beyond that: `Sdk.renew` is the building
+block if you want your own, on a timer, in response to a UI action, or
+whatever fits your application.
 
 ## Threat model
 

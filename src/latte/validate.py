@@ -40,15 +40,16 @@ def validate_at(license: License, machine_id: str, now: float) -> None:
         raise errors.LicenseTooOldError()
 
 
-def in_grace_period(license: License, now: float) -> bool:
-    """True once more than 60 minutes have passed since ``issued_at``
-    without a renewal, while still inside the grace window measured from
-    that same ``issued_at``. This is **not** "is the license in its grace
-    period" despite the name: it flags a stale-but-not-yet-expired
-    renewal, not general grace-period membership.
+def in_grace_period(license: License, now: float, renewal_failed: bool = False) -> bool:
+    """True when the licence is still valid on cached data, the SDK has
+    tried to renew it and could not reach the server, and the offline grace
+    window has not run out: ``renewal_failed`` and more than 60 minutes, but
+    less than the grace period, since ``issued_at``.
+
+    Advisory only: gate features on the ``check`` verdict, never on this.
     """
     since_activation = now - license.issued_at
-    return _MAX_RENEWAL_TIME_SECS < since_activation < license.grace_period_secs
+    return renewal_failed and _MAX_RENEWAL_TIME_SECS < since_activation < license.grace_period_secs
 
 
 def is_valid(license: License, now: float) -> bool:
