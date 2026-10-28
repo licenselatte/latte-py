@@ -38,7 +38,7 @@ import requests
 
 from . import errors, machineid, storage, validate, verify
 from .appid import parse_app_id
-from .domain import CertChain
+from .domain import CertChain, License
 from .key import normalize_key, sanitize_key
 from .license import PublicLicense, _to_public_license, check_license_at
 
@@ -48,6 +48,14 @@ _DEFAULT_TIMEOUT = 30.0
 # often than every _MIN_RENEW_INTERVAL_SECS.
 _RENEW_AFTER_SECS = validate._MAX_RENEWAL_TIME_SECS
 _MIN_RENEW_INTERVAL_SECS = 5 * 60
+
+# What check() rejects a signed token for when only time has passed.
+_LAPSED_ERRORS = (
+    errors.ExpiredError,
+    errors.HardExpiredError,
+    errors.GraceExpiredError,
+    errors.LicenseTooOldError,
+)
 
 _INVALIDATING_ERRORS = (
     errors.LicenseNotFoundError,
@@ -361,14 +369,31 @@ class Sdk:
         now = time.time()
         try:
             lic = check_license_at(self._master_pub, token, chain, self._machine_id, now)
-        except errors.HardExpiredError as e:
-            raise errors.LicenseExpiredError("license expired") from e
+        except _LAPSED_ERRORS as e:
+            self._renew_lapsed(token, chain, now)
+            if isinstance(e, errors.HardExpiredError):
+                raise errors.LicenseExpiredError("license expired") from e
+            raise errors.NotActivatedError("not activated on this machine") from e
         except (errors.VerifyError, errors.ValidateError) as e:
             raise errors.NotActivatedError("not activated on this machine") from e
         self._renew_in_background(lic, now)
         return lic
 
-    def _renew_in_background(self, lic: PublicLicense, now: float) -> None:
+    def _renew_lapsed(self, token: str, chain: CertChain, now: float) -> None:
+        """Starts a renewal for a token ``check`` rejected only because time
+        has passed, so a computer that was off past the grace window recovers
+        by itself. The signature chain and the machine ID must still hold,
+        and the activation and key come from the signed token."""
+        try:
+            lic = verify.verify_activation_at(
+                self._master_pub, token, chain, now, ignore_expiry=True
+            )
+        except errors.VerifyError:
+            return
+        if lic.machine_id == self._machine_id:
+            self._renew_in_background(lic, now)
+
+    def _renew_in_background(self, lic: PublicLicense | License, now: float) -> None:
         """Starts a renewal thread for ``lic`` if it is due and none is
         running."""
         if now - lic.issued_at < _RENEW_AFTER_SECS:
