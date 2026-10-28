@@ -81,7 +81,7 @@ try:
     lic = sdk.activate("USER-PROVIDED-LICENSE-KEY")
     print("license OK, expires", lic.expires_at)
     if lic.in_grace_period:
-        print("warning: offline a while, please reconnect soon")
+        print("Couldn't reach the licence server. Connect to the internet to keep using the app.")
     # Keep lic.activation_id around (in your own storage) so you can call
     # sdk.renew(lic.activation_id, ...) later.
 except LatteError as e:
@@ -121,6 +121,39 @@ machine, `check()` starts the same background renewal. When the machine is
 online, a `check()` a few seconds later succeeds. Hosts should re-check
 rather than send the user to activate again. A token that fails signature
 verification or belongs to another machine never causes a network call.
+
+### `in_grace_period`
+
+`PublicLicense.in_grace_period` is true when the licence is still valid on
+cached data, the SDK has tried to renew it and could not reach the server,
+and the offline grace window has not run out. Formally:
+`renewal_failed and 60 min < age < grace_period`, where `renewal_failed` is
+an in-memory flag on the `Sdk` that a background or manual renewal sets when
+it fails to reach the server (a transport error) and any other outcome
+clears. It is never saved to disk, and `check()` only reads it, so `check()`
+stays offline and no slower.
+
+| Situation | `check()` | `in_grace_period` |
+| --- | --- | --- |
+| Token under 60 minutes old | licence | `False` |
+| Token over 60 minutes old, no renewal has failed | licence | `False` (the SDK is renewing, or has not yet) |
+| A renewal could not reach the server, grace window not over | licence | `True`: show "Couldn't reach the licence server. Connect to the internet to keep using the app." |
+| A renewal could not reach the server, grace window over | raises `NotActivatedError` | n/a: show "reconnect to continue" |
+| A renewal was rejected as invalid or inactive | raises `NotActivatedError` (the cache is cleared) | n/a: show "licence deactivated", never "connect to the internet" |
+
+A server error (5xx, 429), an undecodable response or a renewed token that
+fails local verification counts as reaching the server: the licence is kept,
+the flag is cleared and the next attempt comes at least five minutes later.
+
+The flag changes only when a renewal attempt ends, so call `check()` again
+after a renewal rather than relying on the value you read at startup. It is
+advisory: gate features on the `check()` verdict, never on `in_grace_period`.
+Concurrent renewals (a manual `renew` alongside a background one) are
+last-writer-wins on the flag.
+
+Deactivating a licence in the dashboard takes effect at the next renewal
+attempt. A rejected renewal clears the local cache, so the following
+`check()` returns not-activated.
 
 ## The machine ID
 
@@ -261,8 +294,6 @@ chain = CertChain(submaster=..., project=..., daily=...)
 try:
     lic = check_license(MASTER_PUBLIC_KEYS, token, chain, sdk.machine_id)
     print("license OK, expires", lic.expires_at)
-    if lic.in_grace_period:
-        print("warning: offline a while, please reconnect soon")
 except VerifyError as e:
     print("could not verify license:", e)  # chain/signature/format problem
 except ValidateError as e:
@@ -311,11 +342,14 @@ rules above apply unchanged. The token's `exp` is never enforced while
 verifying the signature chain; it is enforced only here, as these two
 errors.
 
-`PublicLicense.in_grace_period` is a softer, earlier warning signal: it
-turns `True` once more than 60 minutes have passed since the last
-issuance/renewal without a fresh one arriving, while still inside the grace
-window: surface it as a "please reconnect soon" hint, distinct from an
-outright rejection.
+`PublicLicense.in_grace_period` is a softer, earlier warning signal for a
+licence that is still accepted: it is true when the licence is still valid
+on cached data, the SDK has tried to renew it and could not reach the
+server, and the offline grace window has not run out. Surface it as a
+"connect to the internet" hint, distinct from an outright rejection. Age
+alone never sets it; see "Background renewal" for the state table.
+`check_license_at` takes an optional `renewal_failed` argument (default
+`False`), so the pure functions report `False` unless you pass it.
 
 ## Entitlements
 

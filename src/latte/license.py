@@ -27,6 +27,10 @@ class PublicLicense:
     issued_at: float
     expires_at: float
     grace_period_secs: float
+    #: True when the licence is still valid on cached data, the SDK has tried
+    #: to renew it and could not reach the server, and the offline grace
+    #: window has not run out. Advisory: gate features on the ``check``
+    #: verdict, never on this.
     in_grace_period: bool
     license_type: str
     metadata: dict[str, str] = field(default_factory=dict)
@@ -83,10 +87,15 @@ def check_license_at(
     chain: CertChain,
     machine_id: str,
     now: float,
+    renewal_failed: bool = False,
 ) -> PublicLicense:
     """Runs the full verification pipeline on every cached token: chain
     verification, then grace-period validation, then the in-grace-period
     computation.
+
+    ``renewal_failed`` says the SDK has tried to renew this licence and
+    could not reach the server; only then can ``in_grace_period`` be true.
+    ``Sdk.check`` supplies it, and it defaults to false.
 
     Raises a ``VerifyError`` subclass if the chain/signature doesn't check
     out, or a ``ValidateError`` subclass if it checks out but is expired /
@@ -100,7 +109,7 @@ def check_license_at(
     lic = verify.verify_activation_at(master_pub, token, chain, now)
     validate.validate_at(lic, machine_id, now)
 
-    return _to_public_license(lic, validate.in_grace_period(lic, now))
+    return _to_public_license(lic, validate.in_grace_period(lic, now, renewal_failed))
 
 
 def _to_public_license(lic: License, in_grace: bool) -> PublicLicense:
