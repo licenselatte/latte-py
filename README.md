@@ -113,6 +113,15 @@ wait), at most once every five minutes and never two at a time:
 Calling `renew` yourself still works and counts as an attempt for this
 schedule.
 
+A computer that was off longer than the grace window recovers by itself. The
+first `check()` after launch raises `NotActivatedError` (or
+`LicenseExpiredError`) because the cached token is past its grace deadline,
+but if that token's signature chain still verifies and it belongs to this
+machine, `check()` starts the same background renewal. When the machine is
+online, a `check()` a few seconds later succeeds. Hosts should re-check
+rather than send the user to activate again. A token that fails signature
+verification or belongs to another machine never causes a network call.
+
 ### `in_grace_period`
 
 `PublicLicense.in_grace_period` is true when the licence is still valid on
