@@ -90,10 +90,28 @@ except LatteError as e:
 
 By default, a successful `activate`/`renew` is written to an on-disk
 cache, and a later `activate` call for the same key returns the cached
-result without a network round trip as long as it's still valid. There's
-no background renewal: call `renew` yourself on whatever schedule fits
-your application. Set `Config(cache=False)` to disable the cache entirely
-(e.g. a sandboxed environment with no writable filesystem).
+result without a network round trip as long as it's still valid. Set
+`Config(cache=False)` to disable the cache entirely (e.g. a sandboxed
+environment with no writable filesystem).
+
+## Background renewal
+
+`Sdk.check()` verifies the cached token offline and returns at once. When
+that token is an hour old or more, `check()` also starts one renewal on a
+daemon thread (it never keeps your process alive and never makes `check()`
+wait), at most once every five minutes and never two at a time:
+
+- **Success:** the renewed token replaces the cached one.
+- **Rejected as invalid or inactive** (licence not found, expired or
+  deactivated, wrong project key): the local cache is cleared, so the next
+  `check()` raises `NotActivatedError`. A seller deactivating a licence in
+  the dashboard therefore takes effect at the next renewal attempt.
+- **Anything else** (no network, a server error, an unusable response):
+  ignored. The cached token stays valid until its grace deadline and the
+  next attempt is at least five minutes away.
+
+Calling `renew` yourself still works and counts as an attempt for this
+schedule.
 
 ## The machine ID
 
@@ -362,9 +380,10 @@ it server-side.
 
 ## What this package does *not* do
 
-Background renewal scheduling is intentionally out of scope. There's no
-scheduler here: `Sdk.renew` is the building block; call it on a timer, in
-response to a UI action, or whatever fits your application.
+Renewal is automatic only through `Sdk.check()` (see "Background
+renewal"). There's no scheduler beyond that: `Sdk.renew` is the building
+block if you want your own, on a timer, in response to a UI action, or
+whatever fits your application.
 
 ## Threat model
 
