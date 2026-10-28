@@ -36,6 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 import responses
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -812,7 +813,7 @@ def test_background_renewal_does_not_resurrect_a_deactivated_cache(
             {"status": 200, "json": {"token": "garbage", "chain": garbage_chain().__dict__}},
             id="token-fails-verification",
         ),
-        pytest.param({"body": ConnectionError("down")}, id="network"),
+        pytest.param({"body": requests.ConnectionError("down")}, id="network"),
     ],
 )
 @responses.activate
@@ -848,6 +849,181 @@ def test_manual_renew_counts_as_an_attempt_for_the_background_schedule(
     sdk.check()
     _join_renewal(sdk)
     assert len(responses.calls) == 2
+
+
+STALE_ACTIVATION_ID = "act_22222222-2222-2222-2222-222222222222"
+STALE_LICENSE_KEY = "AHAK85T628WZ639CMVHF8TNDDX260Z"
+
+
+def _renew_unreachable(sdk: Sdk) -> None:
+    """A manual renewal of the cached activation that never reaches the server."""
+    responses.upsert(responses.POST, RENEW_URL, body=requests.ConnectionError("down"))
+    with pytest.raises(errors.NetworkError):
+        sdk.renew(STALE_ACTIVATION_ID, STALE_LICENSE_KEY)
+
+
+@responses.activate
+def test_a_stale_token_is_not_in_grace_until_a_renewal_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, _ = stale_sdk(tmp_path, monkeypatch)
+    responses.add(responses.POST, RENEW_URL, status=500)
+
+    assert sdk.check().in_grace_period is False
+    _join_renewal(sdk)
+    assert sdk.check().in_grace_period is False
+
+
+@responses.activate
+def test_background_renewal_that_cannot_reach_the_server_sets_in_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, _ = stale_sdk(tmp_path, monkeypatch)
+    responses.add(responses.POST, RENEW_URL, body=requests.ConnectionError("down"))
+
+    assert sdk.check().in_grace_period is False  # check does not wait for the renewal
+    _join_renewal(sdk)
+
+    assert sdk.check().in_grace_period is True
+
+
+@responses.activate
+def test_manual_renew_that_cannot_reach_the_server_sets_in_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, _ = stale_sdk(tmp_path, monkeypatch)
+
+    _renew_unreachable(sdk)
+
+    assert sdk.check().in_grace_period is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"status": 500, "json": {"error": "boom"}}, id="server-error"),
+        pytest.param({"status": 429}, id="rate-limited"),
+        pytest.param({"status": 200, "body": "not json"}, id="undecodable"),
+        pytest.param(
+            {"status": 200, "json": {"token": "garbage", "chain": garbage_chain().__dict__}},
+            id="token-fails-verification",
+        ),
+    ],
+)
+@responses.activate
+def test_a_renewal_that_reaches_the_server_clears_in_grace_period(
+    response: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, clock = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    responses.upsert(responses.POST, RENEW_URL, **response)
+    clock[0] += 5 * 60
+
+    sdk.check()
+    _join_renewal(sdk)
+
+    assert sdk.check().in_grace_period is False
+
+
+@responses.activate
+def test_manual_renew_that_reaches_the_server_clears_in_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, _ = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    responses.upsert(responses.POST, RENEW_URL, status=500)
+
+    with pytest.raises(errors.ServerError):
+        sdk.renew(STALE_ACTIVATION_ID, STALE_LICENSE_KEY)
+
+    assert sdk.check().in_grace_period is False
+
+
+@responses.activate
+def test_a_successful_renewal_clears_in_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, _, clock = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    responses.upsert(responses.POST, RENEW_URL, json=_response_body(_vector("valid_fresh")))
+    clock[0] += 5 * 60
+
+    sdk.check()
+    _join_renewal(sdk)
+
+    assert sdk.check().in_grace_period is False
+
+
+@responses.activate
+def test_a_rejected_renewal_wipes_the_cache_and_clears_in_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, cache_path, clock = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    responses.upsert(responses.POST, RENEW_URL, status=403)
+    clock[0] += 5 * 60
+
+    sdk.check()
+    _join_renewal(sdk)
+    assert storage.load(cache_path) is None
+
+    # The flag does not outlive the wipe: a later activation of a stale
+    # token starts from false.
+    storage.save(
+        cache_path,
+        _vector("valid_in_grace_period")["token"],
+        CertChain(**_vector("valid_in_grace_period")["chain"]),
+    )
+    responses.upsert(responses.POST, RENEW_URL, status=500)
+    assert sdk.check().in_grace_period is False
+
+
+@responses.activate
+def test_a_failed_attempt_does_not_set_in_grace_period_once_the_cache_moved_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, cache_path, _ = stale_sdk(tmp_path, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def unreachable(_request: object) -> tuple[int, dict[str, str], str]:
+        entered.set()
+        assert release.wait(timeout=5)
+        raise requests.ConnectionError("down")
+
+    responses.add_callback(responses.POST, RENEW_URL, callback=unreachable)
+
+    sdk.check()
+    assert entered.wait(timeout=5)
+    storage.save(cache_path, "someone-elses-token", garbage_chain())
+    release.set()
+    _join_renewal(sdk)
+
+    assert sdk._renewal_failed is False
+
+
+@responses.activate
+def test_deactivate_resets_in_grace_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, _, _ = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    responses.add(responses.POST, f"{BASE_URL}/v1/deactivate", json={"released": True})
+
+    sdk.deactivate(STALE_ACTIVATION_ID, STALE_LICENSE_KEY)
+
+    assert sdk._renewal_failed is False
+
+
+@responses.activate
+def test_activate_resets_in_grace_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, cache_path, _ = stale_sdk(tmp_path, monkeypatch)
+    _renew_unreachable(sdk)
+    storage.clear(cache_path)
+    fresh = _vector("valid_fresh")
+    responses.add(responses.POST, f"{BASE_URL}/v1/activate", json=_response_body(fresh))
+
+    sdk.activate(TEST_LICENSE_KEY)
+
+    assert sdk._renewal_failed is False
+    assert sdk.check().in_grace_period is False
 
 
 def test_check_without_a_cache_starts_no_renewal(tmp_path: Path) -> None:
