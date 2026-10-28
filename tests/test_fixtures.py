@@ -9,16 +9,19 @@ import calendar
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from latte import errors, validate, verify
+from latte import errors, storage, validate, verify
 from latte.domain import CertChain
 from latte.entitlements import UNLIMITED
 from latte.license import PublicLicense, _to_public_license
 
 TESTDATA = Path(__file__).parent.parent / "testdata" / "vectors"
+ANCHORS = json.loads((TESTDATA.parent / "anchors.json").read_text())
+CACHE_FILES = json.loads((TESTDATA.parent / "cache_files.json").read_text())
 
 
 def _load_fixtures() -> list[dict]:
@@ -154,3 +157,39 @@ def _assert_entitlements(lic: PublicLicense, fixture: dict) -> None:
 
 def test_fixture_set_is_complete() -> None:
     assert len(_load_fixtures()) > 15
+
+
+def _keys(hexes: list[str]) -> list[Ed25519PublicKey]:
+    return [Ed25519PublicKey.from_public_bytes(bytes.fromhex(h)) for h in hexes]
+
+
+@pytest.mark.parametrize("case", ANCHORS["cases"], ids=lambda c: c["name"])
+def test_anchor(case: dict[str, Any]) -> None:
+    now = _parse_rfc3339(case["now"])
+    chain = CertChain(**case["chain"])
+    try:
+        lic = verify.verify_activation_at(
+            _keys(case["master_public_keys_hex"]), case["token"], chain, now
+        )
+    except errors.VerifyError:
+        assert (case["expect"], case["expect_stage"]) == ("reject", "verify"), case["name"]
+        return
+    validate.validate_at(lic, case["machine_id"], now)
+    assert case["expect"] == "accept", case["name"]
+
+
+@pytest.mark.parametrize("case", CACHE_FILES["cases"], ids=lambda c: c["name"])
+def test_cache_file(case: dict[str, Any], tmp_path: Path) -> None:
+    path = tmp_path / "cache.json"
+    path.write_text(case["contents"])
+    cached = storage.load(path)
+    if cached is None:
+        return
+    token, chain = cached
+    with pytest.raises(errors.VerifyError):
+        verify.verify_activation_at(
+            _keys(CACHE_FILES["master_public_keys_hex"]),
+            token,
+            chain,
+            _parse_rfc3339(CACHE_FILES["now"]),
+        )
