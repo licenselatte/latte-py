@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 
 import platformdirs
@@ -68,7 +69,8 @@ def load(path: Path) -> tuple[str, CertChain] | None:
 def save(path: Path, token: str, chain: CertChain) -> None:
     """Writes ``token``/``chain`` to the cache file at ``path``, creating
     parent directories as needed. Writes to a temporary file in the same
-    directory first and renames it into place, so a process interrupted
+    directory first (uniquely named per call, so concurrent saves never
+    share one) and renames it into place, so a process interrupted
     mid-write (or a crash) can never leave a half-written, corrupt cache
     file behind: readers only ever see the previous complete version or
     the new one.
@@ -83,9 +85,13 @@ def save(path: Path, token: str, chain: CertChain) -> None:
         "daily": chain.daily,
     }
 
-    tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(record))
-    os.replace(tmp_path, path)
+    tmp_path = path.with_suffix(f".json.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(record))
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def clear(path: Path) -> None:
