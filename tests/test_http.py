@@ -971,3 +971,18 @@ def test_renewal_of_a_lapsed_token_that_cannot_reach_the_server_keeps_the_cache(
         sdk.check()
     _join_renewal(sdk)
     assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_renewal_rejection_wipes_a_cache_whose_project_cert_has_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk, cache_path, clock = stale_sdk(tmp_path, monkeypatch, "expired_past_grace_deadline")
+    clock[0] = 1799064000.0 + 86400  # a day past the cached chain's project cert
+    responses.add(responses.POST, RENEW_URL, status=403)
+
+    with pytest.raises(errors.NotActivatedError):
+        sdk.check()
+    _join_renewal(sdk)
+
+    assert storage.load(cache_path) is None

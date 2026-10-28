@@ -433,14 +433,17 @@ class Sdk:
                 self._renew_in_flight = False
 
     def _cache_holds(self, activation_id: str) -> bool:
-        """Whether the cache holds a verifiable token for ``activation_id``."""
+        """Whether the cache holds a signed token for ``activation_id``, even
+        one whose certs have expired."""
         if self._cache_path is None:
             return False
         cached = storage.load(self._cache_path)
         if cached is None:
             return False
         try:
-            lic = verify.verify_activation_at(self._master_pub, *cached, time.time())
+            lic = verify.verify_activation_at(
+                self._master_pub, *cached, time.time(), ignore_expiry=True
+            )
         except errors.VerifyError:
             return False
         return lic.activation_id == activation_id
