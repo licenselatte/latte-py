@@ -14,11 +14,26 @@ description = "Python SDK for LicenseLatte license activation and offline verifi
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
+keywords = ["license", "licensing", "software-licensing", "activation", "offline", "ed25519", "sdk"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "cryptography>=42",
     "requests>=2.31",
     "platformdirs>=4",
 ]
+
+[project.urls]
+Homepage = "https://licenselatte.com/docs/sdks/python"
+Repository = "https://github.com/licenselatte/latte-py"
+Issues = "https://github.com/licenselatte/latte-py/issues"
 
 [project.optional-dependencies]
 dev = [
