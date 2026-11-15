@@ -421,6 +421,48 @@ it server-side.
 
 ---
 
+## Admin client (server-side)
+
+> **Warning:** `latte.admin` authenticates with an API key (`llk_live_...` or
+> `llk_test_...`). An API key is a secret. Use it only in code you run
+> yourself, such as a storefront webhook or a support tool, and never embed it
+> in an application you ship to end users. Client apps use `latte.Sdk`, which
+> needs no secret.
+
+```python
+import os
+
+from latte.admin import AdminClient, AdminError
+
+admin = AdminClient(os.environ["LICENSELATTE_API_KEY"])
+
+try:
+    lic = admin.issue_license(
+        "b6f1...",  # policy id, from admin.list_policies()
+        customer_email="buyer@example.com",
+        metadata={"order_id": "ord_123"},
+    )
+    admin.suspend_license(lic.license_key)
+except AdminError as e:
+    if e.status_code == 409:
+        ...  # a plan or test-project limit refused the issuance (e.code)
+    raise
+```
+
+Methods: `issue_license`, `list_licenses`, `get_license`, `update_license`,
+`revoke_license`, `suspend_license`, `reinstate_license`, `list_activations`,
+`release_activation`, `resend_license_email`, `list_policies`.
+
+Constructor options: `base_url` (default `https://api.licenselatte.com/v1`),
+`timeout` (seconds, default 30) and `session` (your own
+`requests.Session`). A non-2xx answer raises `AdminError`, a `LatteError`
+with `status_code`, `message` and, when the API sends one, `code`; a
+transport failure raises `NetworkError`. Writes are never retried. Timestamps
+are RFC 3339 strings, and each returned object keeps the full JSON in `raw`,
+so fields this version does not know about stay readable. `update_license`
+replaces `metadata` and `client_metadata` wholesale, and `expires_at=None`
+clears the expiry.
+
 ## What this package does *not* do
 
 Renewal is automatic only through `Sdk.check()` (see "Background
